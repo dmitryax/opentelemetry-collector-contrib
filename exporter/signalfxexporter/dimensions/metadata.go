@@ -16,7 +16,6 @@ package dimensions
 
 import (
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"go.opentelemetry.io/collector/component/componenterror"
@@ -30,10 +29,6 @@ type MetadataUpdateClient interface {
 	PushMetadata([]*collection.MetadataUpdate) error
 }
 
-var propNameSanitizer = strings.NewReplacer(
-	".", "_",
-	"/", "_")
-
 func getDimensionUpdateFromMetadata(
 	metadata collection.MetadataUpdate,
 	metricTranslator *translation.MetricTranslator,
@@ -44,7 +39,7 @@ func getDimensionUpdateFromMetadata(
 		if metricTranslator != nil {
 			res = metricTranslator.TranslateDimension(res)
 		}
-		return propNameSanitizer.Replace(res)
+		return res
 	}
 
 	properties, tags := getPropertiesAndTags(metadata, translateDimension)
