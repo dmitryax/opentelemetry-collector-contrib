@@ -16,7 +16,6 @@ package cpuscraper
 
 import (
 	"context"
-	"google.golang.org/api/drive/v3"
 	"time"
 
 	"github.com/shirou/gopsutil/cpu"
@@ -57,7 +56,7 @@ func (s *scraper) start(context.Context, component.Host) error {
 		return err
 	}
 
-	s.mb.SetStartTime(pdata.Timestamp(bootTime * 1e9))
+	s.startTime = pdata.Timestamp(bootTime * 1e9)
 	return nil
 }
 
@@ -65,6 +64,7 @@ func (s *scraper) scrape(_ context.Context) (pdata.Metrics, error) {
 	md := pdata.NewMetrics()
 	metrics := md.ResourceMetrics().AppendEmpty().InstrumentationLibraryMetrics().AppendEmpty().Metrics()
 
+	now := pdata.NewTimestampFromTime(time.Now())
 	cpuTimes, err := s.times( /*percpu=*/ true)
 	if err != nil {
 		return md, scrapererror.NewPartialScrapeError(err, metricsLen)
@@ -75,9 +75,9 @@ func (s *scraper) scrape(_ context.Context) (pdata.Metrics, error) {
 	mt.EnsureDataPointsCapacity(len(cpuTimes) + cpuStatesLen)
 
 	for _, cpuTime := range cpuTimes {
-		appendCPUTimeStateDataPoints(mt, cpuTime)
+		appendCPUTimeStateDataPoints(mt, s.startTime, now, cpuTime)
 	}
-	mt.AppendToMetricsSlice(metrics)
+	mt.AppendToMetricSlice(metrics)
 	return md, nil
 }
 
