@@ -171,10 +171,8 @@ func (mb metricBuilder) InitMetricTemplate() MetricTemplate {
 		metric.SetDescription(mb.Description())
 		metric.SetUnit(mb.Unit())
 		metric.SetDataType(mb.DataType())
-		if mb.dataType == pdata.MetricDataTypeSum {
-			metric.Sum().SetIsMonotonic(mb.isMonotonic)
-			metric.Sum().SetAggregationTemporality(mb.temporality)
-		}
+		metric.Sum().SetIsMonotonic(mb.IsMonotonic())
+		metric.Sum().SetAggregationTemporality(mb.Temporality())
 		mt.metric = metric
 	}
 
