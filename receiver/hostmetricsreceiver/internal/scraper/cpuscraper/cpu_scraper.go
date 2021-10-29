@@ -72,7 +72,7 @@ func (s *scraper) scrape(_ context.Context) (pdata.Metrics, error) {
 
 	mt := s.mb.SystemCPUTime.InitMetricTemplate()
 
-	mt.EnsureDataPointsCapacity(len(cpuTimes) + cpuStatesLen)
+	mt.EnsureDataPointsCapacity(len(cpuTimes) * cpuStatesLen)
 
 	for _, cpuTime := range cpuTimes {
 		appendCPUTimeStateDataPoints(mt, s.startTime, now, cpuTime)
