@@ -26,9 +26,9 @@ import (
 
 const cpuStatesLen = 4
 
-func appendCPUTimeStateDataPoints(mt metadata.MetricTemplate, startTime, now pdata.Timestamp, cpuTime cpu.TimesStat) {
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.User, cpuTime.User)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.System, cpuTime.System)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Idle, cpuTime.Idle)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Interrupt, cpuTime.Irq)
+func appendCPUTimeStateDataPoints(m metadata.CpuMetric, now pdata.Timestamp, cpuTime cpu.TimesStat) {
+	initializeCPUTimeDataPoint(m, now, cpuTime.CPU, metadata.LabelState.User, cpuTime.User)
+	initializeCPUTimeDataPoint(m, now, cpuTime.CPU, metadata.LabelState.System, cpuTime.System)
+	initializeCPUTimeDataPoint(m, now, cpuTime.CPU, metadata.LabelState.Idle, cpuTime.Idle)
+	initializeCPUTimeDataPoint(m, now, cpuTime.CPU, metadata.LabelState.Interrupt, cpuTime.Irq)
 }
