@@ -21,7 +21,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/cpuscraper/internal/metadata"
 )
 
 // This file implements Factory for CPU scraper.
@@ -37,9 +36,7 @@ type Factory struct {
 
 // CreateDefaultConfig creates the default configuration for the Scraper.
 func (f *Factory) CreateDefaultConfig() internal.Config {
-	return &Config{
-		Metrics: metadata.CreateDefaultMetricsConfig(),
-	}
+	return &Config{}
 }
 
 // CreateMetricsScraper creates a scraper based on provided config.
