@@ -72,12 +72,12 @@ func newMetricBuilder(metadata metricMetadata, config MetricConfig, options ...M
 		return mb
 	}
 
-	mb.createMetric()
 	mb.startTime = pdata.NewTimestampFromTime(time.Now())
-
 	for _, op := range options {
 		op(mb)
 	}
+
+	mb.createMetric()
 	return mb
 }
 
@@ -87,14 +87,6 @@ func (mb *metricBuilder) Enabled() bool {
 		return *mb.config.Enabled
 	}
 	return mb.metadata.enabled
-}
-
-// EnsureDataPointsCapacity ensures metric data points slice capacity.
-func (mb *metricBuilder) EnsureDataPointsCapacity(cap int) {
-	if !mb.Enabled() {
-		return
-	}
-	mb.metric.Sum().DataPoints().EnsureCapacity(cap)
 }
 
 // Reset resets the metric builder startTime and removes previous/current metric state.
@@ -121,9 +113,6 @@ func (mb *metricBuilder) Collect(metrics pdata.MetricSlice) {
 
 	// Reset metric data points collection.
 	mb.createMetric()
-	if mb.initialCapacity > 0 {
-		mb.EnsureDataPointsCapacity(mb.initialCapacity)
-	}
 }
 
 // Name returns the metric name.
@@ -131,6 +120,8 @@ func (mb *metricBuilder) Name() string {
 	return mb.metadata.name
 }
 
+// createMetric builds new metric state.
+// TODO: Use mb.DataPoints().Clear() instead of rebuilding the metrics once the Clear method is available.
 func (mb *metricBuilder) createMetric() {
 	metric := pdata.NewMetric()
 	metric.SetName(mb.Name())
@@ -139,6 +130,9 @@ func (mb *metricBuilder) createMetric() {
 	metric.SetDataType(mb.metadata.dataType)
 	metric.Sum().SetIsMonotonic(mb.metadata.isMonotonic)
 	metric.Sum().SetAggregationTemporality(mb.metadata.temporality)
+	if mb.initialCapacity > 0 {
+		metric.Sum().DataPoints().EnsureCapacity(mb.initialCapacity)
+	}
 	mb.metric = metric
 }
 

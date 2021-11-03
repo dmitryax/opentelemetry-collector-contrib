@@ -44,14 +44,20 @@ func newCPUScraper(_ context.Context, cfg *Config) *scraper {
 	return &scraper{config: cfg, bootTime: host.BootTime, times: cpu.Times}
 }
 
+// Assumed number of CPU cores
+// TODO: use gopsutil to get the real number
+const cpuCoresNumber = 16
+
 func (s *scraper) start(context.Context, component.Host) error {
 	bootTime, err := s.bootTime()
 	if err != nil {
 		return err
 	}
 
-	startTime := pdata.Timestamp(bootTime * 1e9)
-	s.mb = metadata.NewSystemCPUTimeMetricBuilder(s.config.Metrics.SystemCPUTime, metadata.WithStartTime(startTime))
+	withStartTime := metadata.WithStartTime(pdata.Timestamp(bootTime * 1e9))
+	withInitialCapacity := metadata.WithInitialCapacity(cpuCoresNumber * cpuStatesLen)
+	s.mb = metadata.NewSystemCPUTimeMetricBuilder(s.config.Metrics.SystemCPUTime, withStartTime, withInitialCapacity)
+
 	return nil
 }
 
@@ -65,7 +71,6 @@ func (s *scraper) scrape(_ context.Context) (pdata.Metrics, error) {
 		return md, scrapererror.NewPartialScrapeError(err, metricsLen)
 	}
 
-	s.mb.EnsureDataPointsCapacity(len(cpuTimes) * cpuStatesLen)
 	for _, cpuTime := range cpuTimes {
 		appendCPUTimeStateDataPoints(s.mb, now, cpuTime)
 	}
