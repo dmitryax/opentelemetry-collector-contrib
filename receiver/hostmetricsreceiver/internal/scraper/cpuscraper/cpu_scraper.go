@@ -41,11 +41,7 @@ type scraper struct {
 
 // newCPUScraper creates a set of CPU related metrics
 func newCPUScraper(_ context.Context, cfg *Config) *scraper {
-	return &scraper{
-		config:   cfg,
-		bootTime: host.BootTime,
-		times:    cpu.Times,
-	}
+	return &scraper{config: cfg, bootTime: host.BootTime, times: cpu.Times}
 }
 
 func (s *scraper) start(context.Context, component.Host) error {
