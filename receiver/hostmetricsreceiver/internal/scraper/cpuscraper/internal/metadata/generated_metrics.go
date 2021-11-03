@@ -28,7 +28,6 @@ const Type config.Type = "cpu"
 
 type metricMetadata struct {
 	name        string
-	enabled     bool
 	description string
 	unit        string
 	dataType    pdata.MetricDataType
@@ -83,10 +82,7 @@ func newMetricBuilder(metadata metricMetadata, config MetricConfig, options ...M
 
 // Enabled identifies whether the metrics should be collected or not.
 func (mb *metricBuilder) Enabled() bool {
-	if mb.config.Enabled != nil {
-		return *mb.config.Enabled
-	}
-	return mb.metadata.enabled
+	return mb.config.Enabled
 }
 
 // Reset resets the metric builder startTime and removes previous/current metric state.
@@ -144,7 +140,6 @@ type SystemCPUTimeMetricBuilder struct {
 func NewSystemCPUTimeMetricBuilder(config MetricConfig, options ...MetricBuilderOption) *SystemCPUTimeMetricBuilder {
 	metadata := metricMetadata{
 		name:        "system.cpu.time",
-		enabled:     true,
 		description: "Total CPU seconds broken down by different states.",
 		unit:        "s",
 		dataType:    pdata.MetricDataTypeSum,

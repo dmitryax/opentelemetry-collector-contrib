@@ -18,10 +18,18 @@ package metadata
 
 // MetricConfig provides common settings for a particular metric.
 type MetricConfig struct {
-	Enabled *bool `mapstructure:"enabled"`
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // MetricsConfig provides settings for cpuscpaper metrics.
 type MetricsConfig struct {
 	SystemCPUTime MetricConfig `mapstructure:"system.cpu.time"`
+}
+
+func CreateDefaultMetricsConfig() MetricsConfig {
+	return MetricsConfig{
+		MetricConfig{
+			Enabled: true,
+		},
+	}
 }
