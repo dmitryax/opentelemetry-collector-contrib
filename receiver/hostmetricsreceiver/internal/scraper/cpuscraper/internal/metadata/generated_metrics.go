@@ -17,6 +17,8 @@
 package metadata
 
 import (
+	"time"
+
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/model/pdata"
 )
@@ -24,39 +26,151 @@ import (
 // Type is the component type name.
 const Type config.Type = "cpu"
 
-// CpuMetric represents a template for CPU metric creation.
-//
-// Typical use case:
-// m := CpuMetric.Init(startTime)
-// m.EnsureDataPointsCapacity(1)
-// m.Record(now, value, "cpu0", "idle")
-// m.AppendToMetricSlice(metrics)
-type CpuMetric struct {
-	mb             CpuMetricBuilder
-	metric         pdata.Metric
-	startTimestamp pdata.Timestamp
+type metricMetadata struct {
+	name        string
+	enabled     bool
+	description string
+	unit        string
+	dataType    pdata.MetricDataType
+	isMonotonic bool
+	temporality pdata.MetricAggregationTemporality
 }
 
-func (m CpuMetric) EnsureDataPointsCapacity(cap int) {
-	if !m.mb.Enabled() {
+// metricBuilder provides an interface for scrapers to report metrics while taking care of all the transformations
+// required to produce metric representation defined in metadata and user configuration.
+type metricBuilder struct {
+	metadata        metricMetadata
+	config          MetricConfig
+	metric          pdata.Metric
+	initialCapacity int
+	startTime       pdata.Timestamp
+}
+
+// MetricBuilderOption applies changes to default metrics builder.
+type MetricBuilderOption func(metricBuilder)
+
+// WithStartTime sets startTime on the metrics builder.
+func WithStartTime(startTime pdata.Timestamp) MetricBuilderOption {
+	return func(mb metricBuilder) {
+		mb.startTime = startTime
+	}
+}
+
+// WithInitialCapacity sets initial capacity for metric data points.
+func WithInitialCapacity(initialCapacity int) MetricBuilderOption {
+	return func(mb metricBuilder) {
+		mb.initialCapacity = initialCapacity
+	}
+}
+
+func newMetricBuilder(metadata metricMetadata, config MetricConfig, options ...MetricBuilderOption) metricBuilder {
+	mb := metricBuilder{
+		metadata: metadata,
+		config:   config,
+	}
+	if !mb.Enabled() {
+		return mb
+	}
+
+	mb.createMetric()
+	mb.startTime = pdata.NewTimestampFromTime(time.Now())
+
+	for _, op := range options {
+		op(mb)
+	}
+	return mb
+}
+
+// Enabled identifies whether the metrics should be collected or not.
+func (mb *metricBuilder) Enabled() bool {
+	if mb.config.Enabled != nil {
+		return *mb.config.Enabled
+	}
+	return mb.metadata.enabled
+}
+
+// EnsureDataPointsCapacity ensures metric data points slice capacity.
+func (mb *metricBuilder) EnsureDataPointsCapacity(cap int) {
+	if !mb.Enabled() {
 		return
 	}
-	m.metric.Sum().DataPoints().EnsureCapacity(cap)
-	// For other types:
-	// mt.metric.Gauge().DataPoints().EnsureCapacity(cap)
-	// mt.metric.Histogram().DataPoints().EnsureCapacity(cap)
-	// mt.metric.Summary().DataPoints().EnsureCapacity(cap)
+	mb.metric.Sum().DataPoints().EnsureCapacity(cap)
 }
 
-// Record adds a data point to CpuMetric.
+// Reset resets the metric builder startTime and removes previous/current metric state.
+func (mb metricBuilder) Reset(options ...MetricBuilderOption) {
+	if !mb.Enabled() {
+		return
+	}
+	mb.startTime = pdata.NewTimestampFromTime(time.Now())
+	for _, op := range options {
+		op(mb)
+	}
+	mb.createMetric()
+}
+
+// Collect appends generated metric to a pdata.MetricsSlice and updates the internal state to be ready for recording
+// another set of data points. This function will be doing all transformation required to produce metric representation
+// defined in metadata and user configuration, e.g. delta/cumulative translation.
+func (mb *metricBuilder) Collect(metrics pdata.MetricSlice) {
+	if !mb.Enabled() {
+		return
+	}
+
+	mb.metric.CopyTo(metrics.AppendEmpty())
+
+	// Reset metric data points collection.
+	mb.createMetric()
+	if mb.initialCapacity > 0 {
+		mb.EnsureDataPointsCapacity(mb.initialCapacity)
+	}
+}
+
+// Name returns the metric name.
+func (mb *metricBuilder) Name() string {
+	return mb.metadata.name
+}
+
+func (mb *metricBuilder) createMetric() {
+	metric := pdata.NewMetric()
+	metric.SetName(mb.Name())
+	metric.SetDescription(mb.metadata.description)
+	metric.SetUnit(mb.metadata.unit)
+	metric.SetDataType(mb.metadata.dataType)
+	metric.Sum().SetIsMonotonic(mb.metadata.isMonotonic)
+	metric.Sum().SetAggregationTemporality(mb.metadata.temporality)
+	mb.metric = metric
+}
+
+type SystemCPUTimeMetricBuilder struct {
+	metricBuilder
+}
+
+// NewSystemCPUTimeMetricBuilder creates a builder for "system.cpu.time" metric.
+func NewSystemCPUTimeMetricBuilder(config MetricConfig, options ...MetricBuilderOption) *SystemCPUTimeMetricBuilder {
+	metadata := metricMetadata{
+		name:        "system.cpu.time",
+		enabled:     true,
+		description: "Total CPU seconds broken down by different states.",
+		unit:        "s",
+		dataType:    pdata.MetricDataTypeSum,
+		isMonotonic: true,
+		temporality: pdata.MetricAggregationTemporalityCumulative,
+	}
+	return &SystemCPUTimeMetricBuilder{
+		metricBuilder: newMetricBuilder(metadata, config, options...),
+	}
+}
+
+// Record adds a data point to "system.cpu.time" metric.
 // If provided attribute is of AttributeValueTypeEmpty type, it will be skipped.
-func (m CpuMetric) Record(ts pdata.Timestamp, val float64, cpuAttributeValue, stateAttributeValue pdata.AttributeValue) {
-	if !m.mb.Enabled() {
+func (mb *SystemCPUTimeMetricBuilder) Record(ts pdata.Timestamp, val float64, cpuAttributeValue, stateAttributeValue pdata.AttributeValue) {
+	if !mb.Enabled() {
 		return
 	}
 
-	dp := m.metric.Sum().DataPoints().AppendEmpty()
-	dp.SetStartTimestamp(m.startTimestamp)
+	dp := mb.metric.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(mb.startTime)
 	dp.SetTimestamp(ts)
 	dp.SetDoubleVal(val)
 	if cpuAttributeValue.Type() != pdata.AttributeValueTypeEmpty {
@@ -67,72 +181,14 @@ func (m CpuMetric) Record(ts pdata.Timestamp, val float64, cpuAttributeValue, st
 	}
 }
 
-// AppendToMetricSlice appends CpuMetric to a pdata.MetricsSlice.
-func (m CpuMetric) AppendToMetricSlice(metrics pdata.MetricSlice) {
-	if !m.mb.Enabled() {
-		return
-	}
-	m.metric.CopyTo(metrics.AppendEmpty())
-}
-
-type CpuMetricBuilder struct {
-	name        string
-	enabled     bool
-	description string
-	unit        string
-	dataType    pdata.MetricDataType
-	isMonotonic bool
-	temporality pdata.MetricAggregationTemporality
-	config      MetricConfig
-}
-
-// Name returns the metric name.
-func (mb CpuMetricBuilder) Name() string {
-	return mb.name
-}
-
-// Enabled identifies whether the metrics should be collected or not.
-func (mb CpuMetricBuilder) Enabled() bool {
-	if mb.config.Enabled != nil {
-		return *mb.config.Enabled
-	}
-	return mb.enabled
-}
-
-// Init generates CpuMetric.
-func (mb CpuMetricBuilder) Init(startTimestamp pdata.Timestamp) CpuMetric {
-	m := CpuMetric{mb: mb}
-	if mb.Enabled() {
-		metric := pdata.NewMetric()
-		metric.SetName(mb.Name())
-		metric.SetDescription(mb.description)
-		metric.SetUnit(mb.unit)
-		metric.SetDataType(mb.dataType)
-		metric.Sum().SetIsMonotonic(mb.isMonotonic)
-		metric.Sum().SetAggregationTemporality(mb.temporality)
-		m.metric = metric
-		m.startTimestamp = startTimestamp
-	}
-	return m
-}
-
 type MetricBuilders struct {
-	SystemCPUTime CpuMetricBuilder
+	SystemCPUTime *SystemCPUTimeMetricBuilder
 }
 
 // NewMetricBuilders returns helpers for building metrics based on defined metadata
 func NewMetricBuilders(mc MetricsConfig) MetricBuilders {
 	return MetricBuilders{
-		CpuMetricBuilder{
-			name:        "system.cpu.time",
-			enabled:     true,
-			description: "Total CPU seconds broken down by different states.",
-			unit:        "s",
-			dataType:    pdata.MetricDataTypeSum,
-			isMonotonic: true,
-			temporality: pdata.MetricAggregationTemporalityCumulative,
-			config:      mc.SystemCPUTime,
-		},
+		NewSystemCPUTimeMetricBuilder(mc.SystemCPUTime),
 	}
 }
 

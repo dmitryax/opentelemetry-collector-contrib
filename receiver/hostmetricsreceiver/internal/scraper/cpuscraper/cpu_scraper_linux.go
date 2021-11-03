@@ -25,13 +25,13 @@ import (
 
 const cpuStatesLen = 8
 
-func appendCPUTimeStateDataPoints(mt metadata.MetricTemplate, startTime, now pdata.Timestamp, puTime cpu.TimesStat) {
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.User, cpuTime.User)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.System, cpuTime.System)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Idle, cpuTime.Idle)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Interrupt, cpuTime.Irq)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Nice, cpuTime.Nice)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Softirq, cpuTime.Softirq)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Steal, cpuTime.Steal)
-	initializeCPUTimeDataPoint(mt, startTime, now, cpuTime.CPU, metadata.LabelState.Wait, cpuTime.Iowait)
+func appendCPUTimeStateDataPoints(mb *metadata.SystemCPUTimeMetricBuilder, now pdata.Timestamp, cpuTime cpu.TimesStat) {
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.User, cpuTime.User)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.System, cpuTime.System)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Idle, cpuTime.Idle)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Interrupt, cpuTime.Irq)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Nice, cpuTime.Nice)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Softirq, cpuTime.Softirq)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Steal, cpuTime.Steal)
+	initializeCPUTimeDataPoint(mb, now, cpuTime.CPU, metadata.LabelState.Wait, cpuTime.Iowait)
 }

@@ -31,9 +31,8 @@ const metricsLen = 1
 
 // scraper for CPU Metrics
 type scraper struct {
-	config    *Config
-	startTime pdata.Timestamp
-	mb        metadata.MetricBuilders
+	config *Config
+	mb     *metadata.SystemCPUTimeMetricBuilder
 
 	// for mocking
 	bootTime func() (uint64, error)
@@ -46,7 +45,6 @@ func newCPUScraper(_ context.Context, cfg *Config) *scraper {
 		config:   cfg,
 		bootTime: host.BootTime,
 		times:    cpu.Times,
-		mb:       metadata.NewMetricBuilders(cfg.Metrics),
 	}
 }
 
@@ -56,7 +54,8 @@ func (s *scraper) start(context.Context, component.Host) error {
 		return err
 	}
 
-	s.startTime = pdata.Timestamp(bootTime * 1e9)
+	startTime := pdata.Timestamp(bootTime * 1e9)
+	s.mb = metadata.NewSystemCPUTimeMetricBuilder(s.config.Metrics.SystemCPUTime, metadata.WithStartTime(startTime))
 	return nil
 }
 
@@ -70,21 +69,20 @@ func (s *scraper) scrape(_ context.Context) (pdata.Metrics, error) {
 		return md, scrapererror.NewPartialScrapeError(err, metricsLen)
 	}
 
-	m := s.mb.SystemCPUTime.Init(s.startTime)
-	m.EnsureDataPointsCapacity(len(cpuTimes) * cpuStatesLen)
+	s.mb.EnsureDataPointsCapacity(len(cpuTimes) * cpuStatesLen)
 	for _, cpuTime := range cpuTimes {
-		appendCPUTimeStateDataPoints(m, now, cpuTime)
+		appendCPUTimeStateDataPoints(s.mb, now, cpuTime)
 	}
-	m.AppendToMetricSlice(metrics)
+	s.mb.Collect(metrics)
 	return md, nil
 }
 
 const gopsCPUTotal string = "cpu-total"
 
-func initializeCPUTimeDataPoint(mt metadata.CpuMetric, now pdata.Timestamp, cpuLabel string, stateLabel string, value float64) {
+func initializeCPUTimeDataPoint(mb *metadata.SystemCPUTimeMetricBuilder, now pdata.Timestamp, cpuLabel string, stateLabel string, value float64) {
 	cpuAttributeValue := pdata.NewAttributeValueEmpty()
 	if cpuLabel != gopsCPUTotal {
 		cpuAttributeValue = pdata.NewAttributeValueString(cpuLabel)
 	}
-	mt.Record(now, value, cpuAttributeValue, pdata.NewAttributeValueString(stateLabel))
+	mb.Record(now, value, cpuAttributeValue, pdata.NewAttributeValueString(stateLabel))
 }
