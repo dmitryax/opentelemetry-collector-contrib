@@ -169,7 +169,7 @@ require (
 	go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.0.0-20221103164255-2ed41215f324
 	go.opentelemetry.io/collector/receiver/otlpreceiver v0.63.1
 	go.uber.org/multierr v1.8.0
-	golang.org/x/sys v0.1.0
+	golang.org/x/sys v0.2.0
 )
 
 require (
