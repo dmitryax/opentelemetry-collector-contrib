@@ -312,7 +312,7 @@ jobs:
 
   cross-compile:
     runs-on: ubuntu-latest
-    needs: [unittest, integration-tests, lint]
+#    needs: [unittest, integration-tests, lint]
     strategy:
       matrix:
         os:
@@ -382,9 +382,9 @@ jobs:
       - name: Install Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '2.6'
+          ruby-version: '2.7'
       - name: Install fpm
-        run: gem install --no-document fpm -v 1.11.0
+        run: gem install --no-document fpm -v 1.15.0
       - name: Download Collector Binaries
         uses: actions/download-artifact@v3
         with:
