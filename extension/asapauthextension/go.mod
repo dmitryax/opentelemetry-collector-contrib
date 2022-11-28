@@ -6,7 +6,7 @@ require (
 	bitbucket.org/atlassian/go-asap/v2 v2.6.0
 	github.com/SermoDigital/jose v0.9.2-0.20161205224733-f6df55f235c2
 	github.com/stretchr/testify v1.8.1
-	go.opentelemetry.io/collector v0.65.0
+	go.opentelemetry.io/collector v0.66.0
 	go.opentelemetry.io/collector/component v0.65.0
 	go.uber.org/multierr v1.8.0
 	google.golang.org/grpc v1.51.0
