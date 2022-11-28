@@ -6,7 +6,7 @@ require (
 	github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal v0.64.0
 	github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter v0.64.0
 	github.com/stretchr/testify v1.8.1
-	go.opentelemetry.io/collector v0.65.0
+	go.opentelemetry.io/collector v0.66.0
 	go.opentelemetry.io/collector/component v0.65.0
 	go.opentelemetry.io/collector/consumer v0.65.0
 	go.opentelemetry.io/collector/pdata v0.65.0
