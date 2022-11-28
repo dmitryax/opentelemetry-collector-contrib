@@ -12,7 +12,7 @@ require (
 	github.com/rs/cors v1.8.2
 	github.com/soheilhy/cmux v0.1.5
 	github.com/stretchr/testify v1.8.1
-	go.opentelemetry.io/collector v0.65.0
+	go.opentelemetry.io/collector v0.66.0
 	go.opentelemetry.io/collector/component v0.65.0
 	go.opentelemetry.io/collector/consumer v0.65.0
 	go.opentelemetry.io/collector/pdata v0.65.0
