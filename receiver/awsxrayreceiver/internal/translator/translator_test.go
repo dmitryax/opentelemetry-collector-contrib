@@ -1002,8 +1002,8 @@ func compare2ResourceSpans(t *testing.T, testCase string, exp, act ptrace.Resour
 		testCase+": ScopeSpans.Len() differ")
 
 	assert.Equal(t,
-		exp.Resource().Attributes().Sort(),
-		act.Resource().Attributes().Sort(),
+		exp.Resource().Attributes().AsRaw(),
+		act.Resource().Attributes().AsRaw(),
 		testCase+": Resource.Attributes() differ")
 
 	actSpans := act.ScopeSpans().At(0).Spans()
@@ -1019,8 +1019,8 @@ func compare2ResourceSpans(t *testing.T, testCase string, exp, act ptrace.Resour
 		actS := actSpans.At(i)
 
 		assert.Equal(t,
-			expS.Attributes().Sort(),
-			actS.Attributes().Sort(),
+			expS.Attributes().AsRaw(),
+			actS.Attributes().AsRaw(),
 			fmt.Sprintf("%s: span[%s].Attributes() differ", testCase, expS.SpanID()),
 		)
 		expS.Attributes().Clear()
@@ -1039,8 +1039,8 @@ func compare2ResourceSpans(t *testing.T, testCase string, exp, act ptrace.Resour
 			actEvt := actEvts.At(j)
 
 			assert.Equal(t,
-				expEvt.Attributes().Sort(),
-				actEvt.Attributes().Sort(),
+				expEvt.Attributes().AsRaw(),
+				actEvt.Attributes().AsRaw(),
 				fmt.Sprintf("%s: span[%s], event[%d].Attributes() differ", testCase, expS.SpanID(), j),
 			)
 			expEvt.Attributes().Clear()
