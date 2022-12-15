@@ -3,7 +3,7 @@ module github.com/open-telemetry/opentelemetry-collector-contrib/extension/obser
 go 1.18
 
 require (
-	github.com/aws/aws-sdk-go v1.44.158
+	github.com/aws/aws-sdk-go v1.44.161
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/stretchr/testify v1.8.1
 	go.opentelemetry.io/collector v0.67.1-0.20221212050940-28cd74963b9d
