@@ -10,7 +10,7 @@ require (
 	go.opencensus.io v0.24.0
 	go.opentelemetry.io/collector v0.67.1-0.20221212050940-28cd74963b9d
 	go.opentelemetry.io/collector/component v0.67.1-0.20221212050940-28cd74963b9d
-	go.opentelemetry.io/collector/confmap v0.67.0
+	go.opentelemetry.io/collector/confmap v0.68.0
 	go.opentelemetry.io/collector/consumer v0.67.1-0.20221212050940-28cd74963b9d
 	go.opentelemetry.io/collector/pdata v1.0.0-rc1.0.20221212050940-28cd74963b9d
 	go.opentelemetry.io/otel v1.11.2
@@ -46,7 +46,7 @@ require (
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/prometheus/statsd_exporter v0.22.7 // indirect
 	github.com/rogpeppe/go-internal v1.6.1 // indirect
-	go.opentelemetry.io/collector/featuregate v0.67.1-0.20221212050940-28cd74963b9d // indirect
+	go.opentelemetry.io/collector/featuregate v0.68.0 // indirect
 	go.opentelemetry.io/otel/exporters/prometheus v0.33.0 // indirect
 	go.opentelemetry.io/otel/metric v0.34.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.11.1 // indirect
