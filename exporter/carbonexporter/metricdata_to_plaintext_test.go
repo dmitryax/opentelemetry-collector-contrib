@@ -124,7 +124,7 @@ func TestBuildPath(t *testing.T) {
 }
 
 func TestToPlaintext(t *testing.T) {
-	expectedTagsStr := ";k0=v0;k1=v1"
+	expectedTagsCombinations := []string{";k0=v0;k1=v1", ";k1=v1;k0=v0"}
 
 	unixSecs := int64(1574092046)
 	expectedUnixSecsStr := strconv.FormatInt(unixSecs, 10)
@@ -148,7 +148,7 @@ func TestToPlaintext(t *testing.T) {
 	tests := []struct {
 		name                       string
 		metricsDataFn              func() pmetric.Metrics
-		wantLines                  []string
+		wantLines                  [][]string
 		wantNumConvertedTimeseries int
 		wantNumDroppedTimeseries   int
 	}{
@@ -179,11 +179,13 @@ func TestToPlaintext(t *testing.T) {
 				return md
 
 			},
-			wantLines: []string{
-				"gauge_double_no_dims " + expectedDobuleValStr + " " + expectedUnixSecsStr,
-				"gauge_int_no_dims " + expectedInt64ValStr + " " + expectedUnixSecsStr,
-				"cumulative_double_no_dims " + expectedDobuleValStr + " " + expectedUnixSecsStr,
-				"cumulative_int_no_dims " + expectedInt64ValStr + " " + expectedUnixSecsStr,
+			wantLines: [][]string{
+				{
+					"gauge_double_no_dims " + expectedDobuleValStr + " " + expectedUnixSecsStr,
+					"gauge_int_no_dims " + expectedInt64ValStr + " " + expectedUnixSecsStr,
+					"cumulative_double_no_dims " + expectedDobuleValStr + " " + expectedUnixSecsStr,
+					"cumulative_int_no_dims " + expectedInt64ValStr + " " + expectedUnixSecsStr,
+				},
 			},
 			wantNumConvertedTimeseries: 4,
 		},
@@ -221,12 +223,18 @@ func TestToPlaintext(t *testing.T) {
 				dps4.At(0).SetIntValue(int64Val)
 				return md
 			},
-			wantLines: []string{
-				"gauge_double_with_dims" + expectedTagsStr + " " + expectedDobuleValStr + " " + expectedUnixSecsStr,
-				"gauge_int_with_dims" + expectedTagsStr + " " + expectedInt64ValStr + " " + expectedUnixSecsStr,
-				"cumulative_double_with_dims" + expectedTagsStr + " " + expectedDobuleValStr + " " + expectedUnixSecsStr,
-				"cumulative_int_with_dims" + expectedTagsStr + " " + expectedInt64ValStr + " " + expectedUnixSecsStr,
-			},
+			wantLines: func() [][]string {
+				combinations := make([][]string, 0, len(expectedTagsCombinations))
+				for _, tags := range expectedTagsCombinations {
+					combinations = append(combinations, []string{
+						"gauge_double_with_dims" + tags + " " + expectedDobuleValStr + " " + expectedUnixSecsStr,
+						"gauge_int_with_dims" + tags + " " + expectedInt64ValStr + " " + expectedUnixSecsStr,
+						"cumulative_double_with_dims" + tags + " " + expectedDobuleValStr + " " + expectedUnixSecsStr,
+						"cumulative_int_with_dims" + tags + " " + expectedInt64ValStr + " " + expectedUnixSecsStr,
+					})
+				}
+				return combinations
+			}(),
 			wantNumConvertedTimeseries: 4,
 		},
 		{
@@ -239,7 +247,6 @@ func TestToPlaintext(t *testing.T) {
 				dp := ms.At(0).SetEmptyHistogram().DataPoints().AppendEmpty()
 				dp.SetTimestamp(pcommon.NewTimestampFromTime(tsUnix))
 				assert.NoError(t, dp.Attributes().FromRaw(map[string]interface{}{"k0": "v0", "k1": "v1"}))
-				dp.Attributes().Sort() // ensures result order
 				dp.SetCount(distributionCount)
 				dp.SetSum(distributionSum)
 				dp.ExplicitBounds().FromRaw(distributionBounds)
@@ -247,7 +254,7 @@ func TestToPlaintext(t *testing.T) {
 				return md
 			},
 			wantLines: expectedDistributionLines(
-				"distrib", expectedTagsStr, expectedUnixSecsStr,
+				"distrib", expectedTagsCombinations, expectedUnixSecsStr,
 				distributionSum,
 				distributionCount,
 				distributionBounds,
@@ -263,7 +270,6 @@ func TestToPlaintext(t *testing.T) {
 				dp := ms.At(0).SetEmptySummary().DataPoints().AppendEmpty()
 				dp.SetTimestamp(pcommon.NewTimestampFromTime(tsUnix))
 				assert.NoError(t, dp.Attributes().FromRaw(map[string]interface{}{"k0": "v0", "k1": "v1"}))
-				dp.Attributes().Sort() // ensures result order
 				dp.SetCount(summaryCount)
 				dp.SetSum(summarySum)
 				for i := range summaryQuantiles {
@@ -274,7 +280,7 @@ func TestToPlaintext(t *testing.T) {
 				return md
 			},
 			wantLines: expectedSummaryLines(
-				"summary", expectedTagsStr, expectedUnixSecsStr,
+				"summary", expectedTagsCombinations, expectedUnixSecsStr,
 				summarySum,
 				summaryCount,
 				summaryQuantiles,
@@ -287,49 +293,58 @@ func TestToPlaintext(t *testing.T) {
 			gotLines := metricDataToPlaintext(tt.metricsDataFn())
 			got := strings.Split(gotLines, "\n")
 			got = got[:len(got)-1]
-			assert.Equal(t, tt.wantLines, got)
+			assert.Contains(t, tt.wantLines, got)
 		})
 	}
 }
 
 func expectedDistributionLines(
-	metricName, tags, timestampStr string,
+	metricName string,
+	tagsCombinations []string,
+	timestampStr string,
 	sum float64,
 	count uint64,
 	bounds []float64,
 	counts []uint64,
-) []string {
-	lines := []string{
-		metricName + ".count" + tags + " " + formatInt64(int64(count)) + " " + timestampStr,
-		metricName + tags + " " + formatFloatForLabel(sum) + " " + timestampStr,
-	}
-
-	for i, bound := range bounds {
+) [][]string {
+	combinations := make([][]string, 0, len(tagsCombinations))
+	for _, tags := range tagsCombinations {
+		lines := []string{
+			metricName + ".count" + tags + " " + formatInt64(int64(count)) + " " + timestampStr,
+			metricName + tags + " " + formatFloatForLabel(sum) + " " + timestampStr,
+		}
+		for i, bound := range bounds {
+			lines = append(lines,
+				metricName+".bucket"+tags+";upper_bound="+formatFloatForLabel(bound)+" "+formatInt64(int64(counts[i]))+" "+timestampStr)
+		}
 		lines = append(lines,
-			metricName+".bucket"+tags+";upper_bound="+formatFloatForLabel(bound)+" "+formatInt64(int64(counts[i]))+" "+timestampStr)
+			metricName+".bucket"+tags+";upper_bound=inf "+formatInt64(int64(counts[len(bounds)]))+" "+timestampStr)
+		combinations = append(combinations, lines)
 	}
-	lines = append(lines,
-		metricName+".bucket"+tags+";upper_bound=inf "+formatInt64(int64(counts[len(bounds)]))+" "+timestampStr)
-
-	return lines
+	return combinations
 }
 
 func expectedSummaryLines(
-	metricName, tags, timestampStr string,
+	metricName string,
+	tagsCombinations []string,
+	timestampStr string,
 	sum float64,
 	count uint64,
 	summaryQuantiles []float64,
 	summaryQuantileValues []float64,
-) []string {
-	lines := []string{
-		metricName + ".count" + tags + " " + formatInt64(int64(count)) + " " + timestampStr,
-		metricName + tags + " " + formatFloatForValue(sum) + " " + timestampStr,
+) [][]string {
+	combinations := make([][]string, 0, len(tagsCombinations))
+	for _, tags := range tagsCombinations {
+		lines := []string{
+			metricName + ".count" + tags + " " + formatInt64(int64(count)) + " " + timestampStr,
+			metricName + tags + " " + formatFloatForValue(sum) + " " + timestampStr,
+		}
+		for i := range summaryQuantiles {
+			lines = append(lines,
+				metricName+".quantile"+tags+";quantile="+formatFloatForLabel(summaryQuantiles[i])+" "+formatFloatForValue(summaryQuantileValues[i])+" "+timestampStr)
+		}
+		combinations = append(combinations, lines)
 	}
 
-	for i := range summaryQuantiles {
-		lines = append(lines,
-			metricName+".quantile"+tags+";quantile="+formatFloatForLabel(summaryQuantiles[i])+" "+formatFloatForValue(summaryQuantileValues[i])+" "+timestampStr)
-	}
-
-	return lines
+	return combinations
 }
