@@ -576,8 +576,9 @@ github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
-github.com/stretchr/testify v1.8.1 h1:w7B6lhMri9wdJUVmEZPGGhZzrYTPvgJArz7wNPgYKsk=
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
+github.com/stretchr/testify v1.8.2 h1:+h33VjcLVPDHtOdpUCuF+7gSuG3yGIftsP1YvFihtJ8=
+github.com/stretchr/testify v1.8.2/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
 github.com/stvp/go-udp-testing v0.0.0-20201019212854-469649b16807/go.mod h1:7jxmlfBCDBXRzr0eAQJ48XC1hBu1np4CS5+cHEYfwpc=
 github.com/subosito/gotenv v1.4.1 h1:jyEFiXpy21Wm81FBN71l9VoMMV8H8jG+qIK3GCpY6Qs=
 github.com/tklauser/go-sysconf v0.3.11 h1:89WgdJhk5SNwJfu+GKyYveZ4IaJ7xAkecBo+KdJV0CM=
@@ -621,8 +622,8 @@ go.opentelemetry.io/collector/processor/batchprocessor v0.69.0 h1:sajU3HPIaDWdyO
 go.opentelemetry.io/collector/processor/batchprocessor v0.69.0/go.mod h1:cUEQggiMR/8IOq8G175el1PTEP9QSSqXHdcNdMeUIkE=
 go.opentelemetry.io/collector/receiver/otlpreceiver v0.69.0 h1:NplTjuUmJmdCjZEUVt3GIULJe477rQoTFIkuGknOLMA=
 go.opentelemetry.io/collector/receiver/otlpreceiver v0.69.0/go.mod h1:kFr4l2eBPcAbIHeDwHj3ojKD6hEK9u99rRb1qWzOCdI=
-go.opentelemetry.io/collector/semconv v0.69.0 h1:B4eMTnWM4ZRQS4RI/SZaTRoDcT6eFVPEymH7qJ31Pmk=
-go.opentelemetry.io/collector/semconv v0.69.0/go.mod h1:5o9yhOa+ABt7g2E5JABDxGZ1PQPbtfxrKNbYn+LOTXU=
+go.opentelemetry.io/collector/semconv v0.73.0 h1:gF4f6z1q8YfWzzo/gPKysjFmmM4Pv4nC2bWrTPxTPaE=
+go.opentelemetry.io/collector/semconv v0.73.0/go.mod h1:xt8oDOiwa1jy24tGUo8+SzpphI7ZredS2WM/0m8rtTA=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.37.0 h1:+uFejS4DCfNH6d3xODVIGsdhzgzhh45p9gpbHQMbdZI=
 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.37.0/go.mod h1:HSmzQvagH8pS2/xrK7ScWsk0vAMtRTGbMFgInXCi8Tc=
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.37.0 h1:yt2NKzK7Vyo6h0+X8BA4FpreZQTlVEIarnsBP/H5mzs=
