@@ -13,9 +13,9 @@ require (
 	go.opentelemetry.io/build-tools/checkdoc v0.3.0
 	go.opentelemetry.io/build-tools/chloggen v0.3.0
 	go.opentelemetry.io/build-tools/crosslink v0.3.0
-	go.opentelemetry.io/build-tools/issuegenerator v0.3.0
+	go.opentelemetry.io/build-tools/issuegenerator v0.7.0
 	go.opentelemetry.io/build-tools/multimod v0.3.0
-	golang.org/x/tools v0.2.0
+	golang.org/x/tools v0.6.0
 )
 
 require (
@@ -103,7 +103,7 @@ require (
 	github.com/jgautheron/goconst v1.5.1 // indirect
 	github.com/jingyugao/rowserrcheck v1.1.1 // indirect
 	github.com/jirfag/go-printf-func-name v0.0.0-20200119135958-7558a9eaa5af // indirect
-	github.com/joshdk/go-junit v0.0.0-20210226021600-6145f504ca0d // indirect
+	github.com/joshdk/go-junit v1.0.0 // indirect
 	github.com/julz/importas v0.1.0 // indirect
 	github.com/kevinburke/ssh_config v0.0.0-20201106050909-4977a11b4351 // indirect
 	github.com/kisielk/errcheck v1.6.2 // indirect
@@ -196,12 +196,12 @@ require (
 	golang.org/x/crypto v0.1.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/exp/typeparams v0.0.0-20220827204233-334a2380cb91 // indirect
-	golang.org/x/mod v0.7.0 // indirect
-	golang.org/x/net v0.4.0 // indirect
-	golang.org/x/oauth2 v0.3.0 // indirect
+	golang.org/x/mod v0.8.0 // indirect
+	golang.org/x/net v0.9.0 // indirect
+	golang.org/x/oauth2 v0.7.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/sys v0.3.0 // indirect
-	golang.org/x/text v0.5.0 // indirect
+	golang.org/x/sys v0.7.0 // indirect
+	golang.org/x/text v0.9.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
