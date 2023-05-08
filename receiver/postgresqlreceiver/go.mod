@@ -5,15 +5,15 @@ go 1.18
 require (
 	github.com/lib/pq v1.10.7
 	github.com/open-telemetry/opentelemetry-collector-contrib/internal/comparetest v0.69.0
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.8.2
 	github.com/testcontainers/testcontainers-go v0.17.0
 	go.opentelemetry.io/collector v0.69.0
 	go.opentelemetry.io/collector/component v0.69.0
 	go.opentelemetry.io/collector/confmap v0.69.0
 	go.opentelemetry.io/collector/consumer v0.69.0
-	go.opentelemetry.io/collector/featuregate v0.69.0
+	go.opentelemetry.io/collector/featuregate v0.76.1
 	go.opentelemetry.io/collector/pdata v1.0.0-rc3.0.20230109164642-7d168dd20efd
-	go.uber.org/multierr v1.9.0
+	go.uber.org/multierr v1.11.0
 	go.uber.org/zap v1.24.0
 )
 
