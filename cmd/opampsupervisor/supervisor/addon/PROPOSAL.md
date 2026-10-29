@@ -188,12 +188,21 @@ against each other.
 
 Four things the PoC established that were not visible from reading the code.
 
-**1. `accepts_packages: true` is broken today, not merely incomplete.** The
-Supervisor declared the capability but never supplied a
-`PackagesStateProvider`, and opamp-go's `validateCapabilities` returns
-`ErrPackagesStateProviderNotSet` from `PrepareStart`, so the OpAMP client
-refuses to start. Reproduced in `packages_gap_test.go`. Worth reporting
-separately from this proposal.
+**1. Nothing. This slot previously claimed `accepts_packages: true` was broken.
+It is not.** `supervisor.go` rejects the capability during `Start` with
+"accepts_packages capability is not yet fully implemented" and a link to
+#47272, and `TestSupervisorPackageCapabilitiesReturnError` in `e2e_test.go`
+covers it. The guard is deliberate: it is step 1 of #47272's plan, and removing
+it is step 7.
+
+The retracted claim came from grepping for the provider wiring, finding none,
+and inferring the capability was unguarded without grepping for the guard
+itself. The PoC's own tests construct `Supervisor` values directly and never
+run `Start`, so nothing in them surfaced it either.
+
+This PoC removes that guard, along with its e2e test and the
+`supervisor_packages_cap` fixture, so the addon path is reachable through
+normal startup. That is a PoC-only change; upstream it belongs in step 7.
 
 **2. The `role` field is specified but ignored.** `createRemoteConfigComposers`
 merges every `config_map` entry into the Collector's YAML. A server that sends a
@@ -285,11 +294,38 @@ so the field has a reference implementation behind it. Note that the state is
 meaningful for executable addons and fuzzy for file addons, where "disabled" is
 hard to distinguish from configuration.
 
+## Relationship to #47272
+
+#47272 is implementing packages for the **top-level** package, to upgrade the
+Collector binary. Four of its seven steps are merged, most recently the Cosign
+verifier (#50707, 2026-10-28). The remaining three are unclaimed: **package
+manager**, **binary update orchestration** and **e2e and finalization**.
+
+This PoC's `packages.go` overlaps step 5. It is not proposed as step 5. The
+intent is a parallel addon track that consumes step 5's package manager rather
+than a competing implementation:
+
+- Step 5 implements the `types.PackagesStateProvider` stubs for the top-level
+  package. The version here is a stand-in so the addon path is runnable today;
+  it should be discarded in favour of step 5's.
+- Addons need no part of step 6. There is no binary to swap atomically and no
+  rollback of a running Collector, so the addon track can land before step 6
+  and does not sit behind the hardest part of the epic.
+- What addons add on top of step 5 is: whole-tree extraction, the addon
+  manifest, process supervision for executable addons, and `role`-based config
+  routing. Those are additive and touch different files.
+
+Two findings here are useful to #47272 regardless: the `Commander` signal and
+process-group problem (finding 4), which step 6 will hit when it supervises a
+swapped binary, and the single-binary limitation of the step 4 extractor
+(finding 3).
+
 ## Suggested sequencing
 
-1. Report finding 1 as a bug; it is independent of everything else.
+1. Raise the parallel addon track on #47272 before writing more code, so step 5
+   and the addon track agree on the provider boundary.
 2. Open the contrib issue for addon support, scoped to `file` and `executable`,
    with the runtime boundary stated up front. No spec change required.
-3. Generalise process supervision (finding 4) either before or alongside.
+3. Generalise process supervision (finding 4), usable by both tracks.
 4. Land `role` handling (finding 2) with the interoperability question answered.
 5. Only then propose enable/disable to opamp-spec.

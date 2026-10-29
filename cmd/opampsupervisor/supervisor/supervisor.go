@@ -428,13 +428,10 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		return err
 	}
 
-	if s.config.Capabilities.AcceptsPackages {
-		s.telemetrySettings.Logger.Error(
-			"accepts_packages capability is not yet fully implemented. " +
-				"See https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/47272 for progress.",
-		)
-		return errors.New("accepts_packages capability is not yet fully implemented")
-	}
+	// The guard that rejected accepts_packages here is removed in this PoC so the
+	// addon path is reachable through normal startup. Upstream, removing it is
+	// step 7 of #47272, after the package manager and binary update
+	// orchestration land.
 
 	if err = s.getFeatureGates(); err != nil {
 		return fmt.Errorf("could not get feature gates from the Collector: %w", err)
