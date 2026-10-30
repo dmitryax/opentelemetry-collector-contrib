@@ -54,13 +54,12 @@ type packageState struct {
 // packageManager manages the persistent state of downloadable packages.
 //
 // Top-level packages carry the Collector executable and are installed by the
-// existing agent update path. Addon packages are extracted into their own
-// directory and, when their manifest declares an entrypoint, run by the
-// Supervisor as managed child processes.
+// agent update path. Addon packages are named "<type>:<name>" and are installed
+// and run by the factory registered for their type.
 type packageManager struct {
-	logger   *zap.Logger
-	rootDir  string
-	registry *addon.Registry
+	logger  *zap.Logger
+	rootDir string
+	addons  *addon.Manager
 
 	// mu guards both the in-memory state and the files backing it. The syncer
 	// may call these methods concurrently when several packages are offered.
@@ -72,16 +71,16 @@ var _ types.PackagesStateProvider = &packageManager{}
 
 // newPackageManager returns a packageManager storing packages under rootDir,
 // loading any state left by a previous run.
-func newPackageManager(logger *zap.Logger, rootDir string, registry *addon.Registry) (*packageManager, error) {
+func newPackageManager(logger *zap.Logger, rootDir string, addons *addon.Manager) (*packageManager, error) {
 	if err := os.MkdirAll(rootDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create package directory: %w", err)
 	}
 
 	p := &packageManager{
-		logger:   logger,
-		rootDir:  rootDir,
-		registry: registry,
-		state:    packageState{Packages: map[string]*packageRecord{}},
+		logger:  logger,
+		rootDir: rootDir,
+		addons:  addons,
+		state:   packageState{Packages: map[string]*packageRecord{}},
 	}
 
 	if err := p.load(); err != nil {
@@ -129,10 +128,13 @@ func (p *packageManager) statePath() string {
 }
 
 // packageDir returns the directory holding one package. Package names are
-// server-chosen and may contain path separators (for example "splunk/TA1"), so
-// the name is escaped rather than used as a path.
+// server-chosen, so the name is escaped rather than used as a path. Every
+// character other than letters, digits and "-_.~" is escaped, not only path
+// separators: addon names always contain ":", which Windows forbids in file
+// names, and which the JVM treats as a class path separator, so a jar under a
+// directory named "jmx:tomcat" cannot be run with "java -jar".
 func (p *packageManager) packageDir(packageName string) string {
-	return filepath.Join(p.rootDir, url.PathEscape(packageName))
+	return filepath.Join(p.rootDir, url.QueryEscape(packageName))
 }
 
 func (p *packageManager) contentPath(packageName string) string {
@@ -213,6 +215,15 @@ func (p *packageManager) CreatePackage(packageName string, typ protobufs.Package
 		return fmt.Errorf("package %q already exists", packageName)
 	}
 
+	// The syncer calls CreatePackage before downloading, and reports an error
+	// as INSTALL_FAILED, so an addon of an unsupported type is rejected without
+	// fetching it.
+	if typ == protobufs.PackageType_PackageType_Addon {
+		if err := p.addons.Supports(packageName); err != nil {
+			return err
+		}
+	}
+
 	if err := os.MkdirAll(p.packageDir(packageName), 0o700); err != nil {
 		return fmt.Errorf("create directory for package %q: %w", packageName, err)
 	}
@@ -252,9 +263,9 @@ func (p *packageManager) FileContentHash(packageName string) ([]byte, error) {
 // extracted or run.
 func (p *packageManager) UpdateContent(
 	ctx context.Context,
-	packageName, _ string,
+	packageName, downloadURL string,
 	data io.Reader,
-	contentHash, _ []byte,
+	contentHash, signature []byte,
 ) error {
 	p.mu.Lock()
 	record, ok := p.state.Packages[packageName]
@@ -289,14 +300,13 @@ func (p *packageManager) UpdateContent(
 		return nil
 	}
 
-	return p.installAddon(ctx, packageName, content)
+	return p.installAddon(ctx, packageName, content, downloadURL, signature)
 }
 
-// installAddon extracts an addon package into a fresh directory and registers
-// it. Extraction happens into a temporary directory which replaces the live one
-// only on success, so a package that fails to extract leaves the previous
-// version in place.
-func (p *packageManager) installAddon(ctx context.Context, packageName string, content []byte) error {
+// installAddon installs an addon package into a fresh directory using its
+// type's factory, then swaps it into place. A failing install leaves the
+// previous version installed and running.
+func (p *packageManager) installAddon(ctx context.Context, packageName string, content []byte, downloadURL string, signature []byte) error {
 	finalDir := p.AddonDir(packageName)
 	stagingDir := finalDir + ".new"
 
@@ -307,23 +317,16 @@ func (p *packageManager) installAddon(ctx context.Context, packageName string, c
 		return fmt.Errorf("create staging directory for addon %q: %w", packageName, err)
 	}
 
-	if err := addon.ExtractTarGz(content, stagingDir); err != nil {
+	if err := p.addons.Install(ctx, packageName, stagingDir, content, downloadURL, signature); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("extract addon %q: %w", packageName, err)
+		return fmt.Errorf("install addon %q: %w", packageName, err)
 	}
 
-	// Fail before touching the installed copy if the package is not a usable
-	// addon, so a malformed offer cannot take down a working one.
-	if _, err := addon.ReadManifest(stagingDir); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		return err
-	}
-
-	// Stop the running process before replacing its files. On Windows a running
-	// executable cannot be replaced, and on any platform a process reading files
-	// that are being swapped is a race.
-	if err := p.registry.Remove(ctx, packageName); err != nil {
-		p.logger.Warn("Could not stop addon before replacing its files",
+	// Shut the running addon down before replacing its files. On Windows a
+	// running executable cannot be replaced, and on any platform a process
+	// reading files that are being swapped is a race.
+	if err := p.addons.Unload(ctx, packageName); err != nil {
+		p.logger.Warn("Could not shut down addon before replacing its files",
 			zap.String("addon", packageName), zap.Error(err))
 	}
 
@@ -334,7 +337,7 @@ func (p *packageManager) installAddon(ctx context.Context, packageName string, c
 		return fmt.Errorf("install addon %q: %w", packageName, err)
 	}
 
-	if _, err := p.registry.Load(ctx, packageName, finalDir); err != nil {
+	if err := p.addons.Load(ctx, packageName, finalDir); err != nil {
 		return err
 	}
 
@@ -346,8 +349,8 @@ func (p *packageManager) installAddon(ctx context.Context, packageName string, c
 func (p *packageManager) DeletePackage(packageName string) error {
 	// Stop the process before removing files, and do it outside the lock since
 	// stopping waits on the process to exit.
-	if err := p.registry.Remove(context.Background(), packageName); err != nil {
-		p.logger.Warn("Could not stop addon before deleting it",
+	if err := p.addons.Unload(context.Background(), packageName); err != nil {
+		p.logger.Warn("Could not shut down addon before deleting it",
 			zap.String("addon", packageName), zap.Error(err))
 	}
 
@@ -397,9 +400,10 @@ func (p *packageManager) SetLastReportedStatuses(statuses *protobufs.PackageStat
 	return writeFileAtomic(filepath.Join(p.rootDir, packageStatusesFile), data, 0o600)
 }
 
-// loadInstalledAddons registers every addon already on disk. It runs at startup
-// so that a restarted Supervisor adopts the addons it installed previously
-// without waiting for the server to re-offer them.
+// loadInstalledAddons loads every addon already on disk. It runs at startup so
+// that a restarted Supervisor adopts the addons it installed previously without
+// waiting for the server to re-offer them. Nothing is started here; the
+// startup reconciliation does that once the persisted remote config is known.
 func (p *packageManager) loadInstalledAddons(ctx context.Context) error {
 	p.mu.Lock()
 	names := make([]string, 0, len(p.state.Packages))
@@ -417,7 +421,7 @@ func (p *packageManager) loadInstalledAddons(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("addon %q is recorded but not present at %s: %w", name, dir, err))
 			continue
 		}
-		if _, err := p.registry.Load(ctx, name, dir); err != nil {
+		if err := p.addons.Load(ctx, name, dir); err != nil {
 			errs = append(errs, err)
 		}
 	}

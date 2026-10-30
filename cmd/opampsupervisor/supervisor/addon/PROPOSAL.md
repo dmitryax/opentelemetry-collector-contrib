@@ -26,6 +26,144 @@ OpAMP already specifies everything needed to deliver both: `PackageType_Addon`,
 `download_url`, `content_hash`, `version` and `signature`. None of it is
 implemented anywhere, in any OpAMP implementation.
 
+**No spec change is needed** for anything in this proposal.
+
+## Design: typed addons
+
+An addon's behaviour is decided by its **type**, and each type is implemented
+in Supervisor code. The type is carried in the package name:
+
+```
+<type>:<name>          jmx:tomcat   file:geoip   splunk_ta:unix
+```
+
+The same string is the key of the addon's configuration in the remote config
+map, so one name identifies an addon in `PackagesAvailable`, `PackageStatuses`
+and `AgentConfigMap`.
+
+Built-in types:
+
+| Type | Package content | What the Supervisor does |
+|---|---|---|
+| `file` | a `.tar.gz`/`.tgz`, or any single file | extracts it, or stores it under the download URL's file name; runs nothing |
+| `jmx` | the `opentelemetry-jmx-scraper` jar, as published | checks for a JVM, runs `java -jar <jar> -config <properties>`, restarts it on config change |
+
+Other types are added by registering a factory. A distribution does that
+through a constructor option:
+
+```go
+sup, err := supervisor.NewSupervisor(ctx, logger, cfg,
+	supervisor.WithAddonFactories(splunkta.NewFactory()))
+```
+
+`supervisor.NewSvcHandler(opts...)` takes the same options on the Windows
+service path.
+
+### Why types, not a package manifest
+
+An earlier version of this PoC had each package carry a manifest declaring its
+type and entrypoint. Typed addons are better on two counts.
+
+**The server cannot make the Supervisor run arbitrary commands.** With a
+manifest, a package declares what to execute, so whoever controls the OpAMP
+server or the download location controls what runs on the host. With types, the
+server can only pick among the types the Supervisor was built with, and each
+type owns its launch logic: the `jmx` type will only ever run the scraper jar
+under a JVM. This is the property #45740 was asking for, and checksums alone did
+not provide.
+
+**Upstream artifacts are usable as-is.** The scraper's release asset is a raw
+jar at a stable URL with a published checksum. The `jmx` type accepts it
+directly, so a server offers that URL and its SHA-256 and nothing is repackaged.
+A manifest design requires wrapping the jar in an archive per release.
+
+There is deliberately no generic `exec` type. It would be the manifest design
+again, and the arbitrary-execution objection with it.
+
+### Naming
+
+The shape follows confmap URIs: everything before the first `:` is the type and
+the rest is opaque, so names may contain further `:` or `/`.
+
+The grammar of the type is the Collector's **component type** grammar,
+`^[a-zA-Z][0-9a-zA-Z_]{0,62}$`, not confmap's scheme grammar. Confmap schemes
+follow RFC 3986 and do not allow `_` (`[A-Za-z][A-Za-z0-9+.-]+`), which rules out
+`splunk_ta`. Addon types read like component types, so they use that grammar.
+
+Top-level packages are not subject to the naming rule.
+
+### Framework
+
+```go
+type Factory interface {
+	Type() Type
+	// Install lays out verified package content in an empty staging directory.
+	// An error is reported to the server as INSTALL_FAILED.
+	Install(ctx context.Context, set InstallSettings) error
+	// Create returns the runtime object for an installed addon. Starts nothing.
+	Create(ctx context.Context, set Settings) (Addon, error)
+}
+
+type Addon interface {
+	Configure(ctx context.Context, body []byte) (Effect, error) // nil body: no config offered
+	Start(ctx context.Context) (Effect, error)                  // idempotent
+	Shutdown(ctx context.Context) error                         // files stay
+}
+
+type Effect struct {
+	RestartAgent bool // the Collector must restart to observe this change
+}
+```
+
+The Supervisor **reconciles** rather than replaying events. After every package
+sync, every remote config change, and once at startup, it calls `Configure` on
+each addon whose configuration changed and then `Start` on all of them. That
+stays correct after a restart, where nothing is replayed, and means a type never
+has to reason about message ordering. The manager tracks the last applied config
+per addon, so an unchanged offer is a no-op and a type need not diff.
+
+`addon/process` is an exported process supervisor that types needing a child
+process can reuse.
+
+### Configuration and ordering
+
+Addon configuration is a remote config entry whose `AgentConfigObject.role` is
+`addon-config` and whose key is the addon's name. The role, not the key's shape,
+selects it: config map keys are free-form, and a Collector config entry keyed
+`file:base.yaml` must not be taken for addon configuration. `role` was added for
+this purpose (opamp-spec #350, resolving #184).
+
+`remote_config` and `packages_available` are each complete when present, but
+the server sends each only when its own hash is stale, so they are not
+guaranteed to arrive together. Reconciliation makes arrival order irrelevant:
+configuration for an addon that is not installed yet is held, and applied by the
+reconciliation that follows its package sync.
+
+**One Collector restart per message.** Types the Collector itself reads, such as
+a Splunk TA, return `Effect{RestartAgent: true}`. When a message changes the
+Collector config and also offers packages, the Supervisor holds that restart
+until the package sync completes, then signals once. The Collector restarts a
+single time and observes both changes, instead of restarting with the old addons
+and again with the new. At startup, addons are reconciled before the Collector
+first starts, so their restart requests are moot.
+
+Servers should still send coupled changes, such as a new TA and its state, in
+the same `ServerToAgent`. Across messages the agent converges, but a restart can
+happen in between.
+
+### Enable/disable without a spec change
+
+A type can carry state in its configuration. The `splunk_ta` test type takes
+`enabled` or `disabled` from its config entry, writes `local/app.conf`, and asks
+for a Collector restart when the state changes on a loaded TA
+(`TestAddonStateChangeRestartsCollectorOnce`). No proto change is involved, and
+the content hash is unchanged, so nothing is downloaded.
+
+What this does not give is per-addon reporting. `RemoteConfigStatus` is one
+status per `config_hash`, so a failed state change fails the whole remote config.
+Reporting each addon's actual state in `EffectiveConfig`, under the same role and
+key, would close that without a spec change. Not implemented here.
+
 ## Prior art in this repo
 
 `jmxreceiver` already implemented package delivery and process supervision, in
@@ -46,15 +184,13 @@ opentelemetry-jmx-scraper-1.48.0-alpha.jar") is one such fix; the security
 hardening PRs #9721 and #9985 and the orphaned-process bug #23051 are all
 symptoms of solving this inside a receiver.
 
-Each piece maps onto a protocol field that already exists:
-
-| jmxreceiver | OpAMP Packages |
+| jmxreceiver | Typed addon |
 |---|---|
 | `hashFile()` + 83-entry allowlist | `DownloadableFile.content_hash`, supplied per offer |
 | `supportedJar.version` | `PackageAvailable.version` |
 | `jar_path`, populated manually | `DownloadableFile.download_url` |
-| compile-time hash map, needs a release | server computes the hash per offer |
-| `subprocess.Config` | Supervisor-managed executable addon |
+| receiver builds the `java` command line | the `jmx` type builds it; the server cannot change it |
+| `subprocess.Config` | `addon/process` |
 
 ## The objection, and the answer
 
@@ -66,86 +202,24 @@ Issue **#45740** (rogercoll, 2026-01-30) deprecated the receiver and states:
 > subprocesses at all; the jmxreceiver is an exception that sets an undesirable
 > precedent, even with its checksum-based restrictions.
 
-That last clause pre-rejects "we would hash it properly". Three responses:
-
 1. **The Supervisor is not the Collector.** #45740 is scoped to the Collector
    process: no JRE in its image, and subprocess lifecycle entangled with
    receiver start and shutdown (#23051). The Supervisor is already a process
-   manager; starting, stopping, restarting and configuring the Collector is its
-   entire job. A second managed child is a quantitative change, not a new
-   architectural precedent.
-2. **"Traditional mechanisms" is doing a lot of work.** In Kubernetes that means
-   a sidecar and this proposal is unnecessary. On VM and bare-metal fleets it
-   means hand-rolled unit files plus a private distribution channel per
-   operator, which is the problem OpAMP exists to solve.
+   manager; a second managed child is a quantitative change, not a new
+   precedent.
+2. **Typed addons are a narrower precedent than checksums.** The objection
+   dismisses checksum restrictions. Typed addons do not rely on them: the set of
+   things that can run is fixed by the Supervisor build, per type.
 3. **The runtime problem does not go away, and this proposal concedes it.** A
    Supervisor-delivered jar fails on a host without Java exactly as a
-   Collector-delivered one does, and in containers it fails identically because
-   the Supervisor is in the container too.
+   Collector-delivered one does, and identically in containers.
 
-On (3), the scope boundary is explicit: **executable addons target host and VM
-deployments, not containers.** An addon's runtime prerequisite is its
-entrypoint, resolved before launch, and a missing runtime is a deterministic,
-non-retryable failure naming what is absent rather than an agent that merely
-looks broken. `ErrRuntimeNotFound` and
-`TestExecutableAddonMissingRuntimeFailsDeterministically` implement and cover
-this. File addons have none of these problems and work everywhere.
-
-## The design question this PoC was built to answer: who configures an addon?
-
-The JMX scraper needs `otel.jmx.service.url` per target. Repackaging the addon
-per target was ruled out immediately: it destroys artifact reuse and makes the
-content hash per-host. That leaves two options.
-
-### Option B: remote config, routed by `role`
-
-`AgentConfigMap` is already a map of named objects, and `AgentConfigObject` has
-a `role` field (added in opamp-spec PR #350, 2026-08-03, resolving #184). The
-spec's own description of `role` is:
-
-> an Agent type may use this field to distinguish top-level configuration from
-> supplementary content such as certificates or other artifacts referenced by
-> configuration
-
-So this needs **no spec change**. An entry whose `role` is `addon-config` and
-whose key names an addon package configures that addon.
-
-Worth noting: #184 explicitly considered and rejected delivering supplementary
-content as packages, calling it "out-of-band for configuration and [...] likely
-a complicated flow". That supports the split this PoC implements: the addon
-*artifact* travels as a package, its *configuration* as remote config.
-
-**For:** no spec change; central fleet management; one offer configures many
-addons; per-target values without repackaging; reuses the server's existing
-config delivery, hashing and `RemoteConfigStatus` machinery.
-
-**Against:** addon config is hashed and versioned together with Collector
-config, so changing a scraper property bumps `config_hash` and travels the
-remote-config apply path, mixing two blast radii; a change to addon config
-restarts the addon, not the Collector, which is a different failure domain from
-what `config_hash` implies. There is also an interoperability hazard, below.
-
-### Option C: Supervisor-injected from its own local configuration
-
-**For:** zero protocol involvement; the natural home for genuinely host-local
-values.
-
-**Against:** it defeats central management. Configuring ten thousand hosts by
-editing their Supervisor configs is what OpAMP exists to avoid. There is no
-status reporting path and no way to make a fleet-wide change.
-
-### Recommendation
-
-**Option B for delivery, with Option C as a declared escape hatch for host-local
-values.** The PoC implements B.
-
-One honest limitation: **B alone does not solve per-host values.** The PoC
-delivers one config body to one addon on every host. That is fine where the
-target is uniform (`localhost:<fixed port>`, which covers the common JMX case)
-and insufficient where it is not. Nothing in OpAMP substitutes per-host values
-into a config body. If per-host values are needed, the Supervisor's own config
-has to supply them and the remote body has to be a template. That is a real
-design question still open, and it is not specific to addons.
+On (3), the scope boundary is explicit: **executable addon types target host and
+VM deployments, not containers.** The `jmx` type checks for a JVM (`JAVA_HOME`,
+then `PATH`) in `Install`, so a host without Java reports `INSTALL_FAILED` with
+a reason the server sees, rather than reporting a successful install of an addon
+that never runs (`TestJMXAddonWithoutJavaReportsInstallFailure`). File addons
+have none of these problems.
 
 ## What the PoC implements
 
@@ -153,78 +227,47 @@ design question still open, and it is not specific to addons.
 <storage>/packages/
   state.json                     package records and all_packages_hash
   last_reported_statuses.bin     PackageStatuses, so a restart reports what it has
-  <escaped-package-name>/
+  <escaped-package-name>/        e.g. jmx%3Atomcat
     content                      the package file exactly as downloaded
-    files/                       the extracted addon tree
-      opamp-addon.yaml           the addon manifest
-      addon.log                  the addon process's stdout and stderr
+    files/                       the installed addon
 ```
 
-`packages.go` is a real `types.PackagesStateProvider`. `supervisor.go` supplies
-it to the OpAMP client and routes `role`-tagged config away from the Collector's
-YAML. `addon/` holds the manifest, extraction, process supervision and registry.
-
-An addon describes itself, so one offer serves any Supervisor without the server
-knowing how to launch it:
-
-```yaml
-type: executable                 # or "file"
-entrypoint: ["java", "-jar", "opentelemetry-jmx-scraper.jar", "-config", "scraper.properties"]
-config_file: scraper.properties  # where the Supervisor writes delivered config
-env: {}                          # optional, merged into the process environment
-```
-
-`entrypoint[0]` is resolved on PATH when it has no path separator, and inside
-the addon directory otherwise. The process runs with the addon directory as its
-working directory and receives `OPAMP_ADDON_DIR` and, when a config file is
-declared, `OPAMP_ADDON_CONFIG`.
-
-Reconciliation rather than events: the registry is told which addons should be
-present and starts or stops accordingly. That stays correct after a restart,
-where no messages are replayed, and avoids ordering install, configure and start
-against each other.
+- `packages.go`: a filesystem-backed `types.PackagesStateProvider`. Rejects
+  unsupported addon types in `CreatePackage`, which the syncer calls before
+  downloading, so they fail without being fetched. Verifies the content hash,
+  installs into a staging directory through the type's factory, shuts the old
+  addon down, then swaps.
+- `addon/`: `ID`, `Factory`, `Addon`, `Effect`, `Manager`, and tar.gz
+  extraction with escape protection.
+- `addon/fileaddon`, `addon/jmxaddon`: the built-in types.
+- `addon/process`: the shared process supervisor.
+- `options.go`: `WithAddonFactories`.
+- `addons.go`: role-based config routing, reconciliation, and the single
+  coordinated Collector restart.
 
 ## Findings
 
-Four things the PoC established that were not visible from reading the code.
-
-**1. Nothing. This slot previously claimed `accepts_packages: true` was broken.
-It is not.** `supervisor.go` rejects the capability during `Start` with
-"accepts_packages capability is not yet fully implemented" and a link to
-#47272, and `TestSupervisorPackageCapabilitiesReturnError` in `e2e_test.go`
-covers it. The guard is deliberate: it is step 1 of #47272's plan, and removing
-it is step 7.
-
-The retracted claim came from grepping for the provider wiring, finding none,
-and inferring the capability was unguarded without grepping for the guard
-itself. The PoC's own tests construct `Supervisor` values directly and never
-run `Start`, so nothing in them surfaced it either.
-
-This PoC removes that guard, along with its e2e test and the
-`supervisor_packages_cap` fixture, so the addon path is reachable through
-normal startup. That is a PoC-only change; upstream it belongs in step 7.
+**1. Retracted.** An earlier version claimed `accepts_packages: true` was broken.
+It is not: `supervisor.go` rejects it during `Start` with a link to #47272,
+covered by `TestSupervisorPackageCapabilitiesReturnError`. That guard is step 1
+of #47272 and removing it is step 7. This PoC removes it, along with that test
+and its fixture, so the addon path is reachable; upstream it belongs in step 7.
 
 **2. The `role` field is specified but ignored.** `createRemoteConfigComposers`
 merges every `config_map` entry into the Collector's YAML. A server that sends a
-`role`-tagged entry to a current Supervisor corrupts the Collector config. So
-delivering addon config over remote config needs no spec change, but it does
-need a way for the server to know the agent honours `role`. A capability bit or
-a documented minimum version is required; silent merging is the current
-behaviour and it fails closed-ish at best.
+role-tagged entry to a current Supervisor corrupts the Collector config. The
+server needs to know the agent honours `role`: a capability bit or a documented
+minimum version.
 
-**3. The existing `archive` package cannot extract an addon.** It pulls a single
-named binary out of a package. An addon is a tree, so `addon/extract.go` adds
-whole-archive extraction with escape protection: entries that are absolute, that
-traverse upward, or that are symlinks, hardlinks or devices are rejected
-outright rather than skipped, and entry count and total size are bounded.
-Covered by `TestExtractTarGzRejectsHostileArchives`.
+**3. The existing `archive` package cannot extract an addon.** It pulls one
+named binary out of a package. `addon.ExtractTarGz` extracts a whole tree and
+rejects absolute paths, upward traversal, symlinks, hardlinks and devices
+outright, with bounds on entry count and total size.
 
-**4. `Commander` cannot supervise an addon, and the reason is measurable.** It
-signals with `os.Interrupt` (SIGINT) and does not place the child in its own
-process group, because the Collector is a Go binary that handles SIGINT and has
-no children. A shell-wrapped addon ignores SIGINT while waiting on its own
-child, so `Stop` burns the entire grace period and then SIGKILLs. Measured
-directly against `Commander` with no addon code involved:
+**4. `Commander` cannot supervise an addon.** It signals `os.Interrupt` and does
+not use a process group, which is right for the Collector and wrong for a
+runtime or a wrapper script, which ignores SIGINT while waiting on its child.
+Measured against `Commander` alone:
 
 | Delay between Start and Stop | `Commander.Stop` latency |
 |---|---|
@@ -232,100 +275,98 @@ directly against `Commander` with no addon code involved:
 | 50 ms | 556 µs |
 | 200 ms | **10.005 s** (the full grace period, then kill) |
 
-`addon/process.go` runs addons in their own process group and signals the group
-with SIGTERM. `TestAddonLifecycle` went from **20.17 s to 0.20 s**.
+`addon/process` uses a process group and SIGTERM; the lifecycle test went from
+20.17 s to 0.20 s. `Commander` and `addon/process` should converge.
 
-This is the concrete form of a general point: the Supervisor already has process
-supervision, but its semantics are Collector-specific. `Commander` and
-`addon.process` should converge on a shared process supervisor parameterised by
-signal, process-group and grace-period policy, instead of `Commander` being
-coupled to `config.Agent`.
+**5. Package names cannot be used as directory names.** Addon names always
+contain `:`. `url.PathEscape` leaves it alone, so the PoC first stored the jar
+under `jmx:tomcat/`. Two failures follow. Windows forbids `:` in file names. And
+`java -jar` sets `java.class.path` to the jar's path, which the JVM splits on
+`:`, so the scraper fails with `ClassNotFoundException` for its own main class.
+Only the run against the real JVM found this; the stand-in JVM in the unit tests
+did not. Names are now escaped with `url.QueryEscape`, and
+`TestPackageDirIsSafeFileName` pins it.
 
 ## Validation
 
-Everything below passes, with no regressions in the existing Supervisor suite.
+All pass on macOS, with `go vet` clean for Linux and Windows, and the addon
+tests clean under the race detector.
 
-End-to-end against the real artifact (`TestJMXScraperAddonEndToEnd`, requires
-`OPAMP_JMX_SCRAPER_JAR` and `java`): a JVM is started with the JMX remote agent
-enabled; the real `opentelemetry-jmx-scraper.jar` is packaged as an addon and
-installed through the same provider call sequence opamp-go's syncer uses;
-configuration is delivered as a `role`-tagged remote config entry; the addon
-runs as a managed child, connects to the JVM and exports OTLP to a local
-endpoint. Stopping it leaves the jar installed and stops the exports; starting it
-again resumes them without a download.
+End to end against the real artifact (`TestJMXScraperAddonEndToEnd`, needs
+`OPAMP_JMX_SCRAPER_JAR` and `java`): the published
+`opentelemetry-jmx-scraper.jar` is offered as `jmx:tomcat` with no wrapper,
+installed through the provider call sequence opamp-go's syncer uses, configured
+by a `role`-tagged remote config entry under the same key, run against a live
+JVM, and its OTLP export is received. Shutting it down leaves the jar and stops
+the exports; starting it again resumes them without a download.
 
-Lifecycle and failure modes (`addons_test.go`): install, configure, run,
-reconfigure with restart, no restart on unchanged config, upgrade replacing a
-running process, delete stopping the process and removing files, state and
-content hash surviving a restart, `PackageStatuses` round-tripping, content-hash
-mismatch rejected before extraction, a malformed package leaving the previous
-version installed, a file addon never starting a process, a missing runtime
-failing deterministically, and addon config never reaching the Collector's YAML.
+Framework: ID grammar; duplicate and invalid type registration; unsupported types
+rejected before download; configure only on change, nil on withdrawal, start on
+every pass, failures isolated per addon; upgrade shutting down the old instance;
+the constructor wiring the option; a distribution-defined `splunk_ta` type;
+exactly one Collector restart per message, after the TA is on disk; no restart
+when nothing changed.
+
+Types: `file` raw and archived content and rejected config; `jmx` with a
+stand-in JVM covering idle-until-configured, the fixed command line, restart on
+config change, stop on withdrawal, missing JVM at install and at start, and
+non-jar content rejected.
+
+Lifecycle: content-hash mismatch rejected before install; a failed install
+leaving the previous version; state, content hash and running addons surviving a
+Supervisor restart; shutdown leaving no orphaned processes; addon config never
+reaching the Collector's YAML.
 
 ## What this does not do
 
 - No top-level package installation; that is #47272's binary update path.
-- No signature verification. The Supervisor already has a cosign verifier in
-  `supervisor/verifier`, and `UpdateContent` receives the signature; wiring them
-  together is deliberately left out of scope.
-- No new Supervisor configuration surface for addon directories or policy.
-- No enable/disable state. See below.
+- No signature verification. `InstallSettings` carries the signature and the
+  Supervisor has a cosign verifier; wiring them is out of scope.
+- No operator policy over which types may run, for example an allowlist in the
+  Supervisor config. Worth adding before executable types are enabled by
+  default.
+- No advertisement of supported types to the server. A non-identifying
+  `AgentDescription` attribute listing them would let a server avoid offering an
+  unsupported type; today it learns from `INSTALL_FAILED`.
+- No per-addon operational status (running, crash-looping) beyond
+  `PackageStatuses`, which describes installation only.
 - Windows graceful stop ends the process rather than sending a console control
-  event, which matches what the Supervisor does for the Collector today.
-
-## Path to enable/disable
-
-`Addon.Stop` and `Addon.Start` already give the mechanism: an installed addon
-whose process is not running. The protocol has no way to ask for it. Removing a
-package from `packages_available` means delete, per Downloading Packages step 2,
-so the only way to stop a scraper today is to delete its jar and re-download it
-to resume. The PoC demonstrates that stopping and restarting are cheap and that
-the artifact survives, which is exactly what makes delete-to-disable the wrong
-mechanism.
-
-Three scenarios, none vendor-specific: a monitored JVM goes into maintenance and
-its scraper should stop rather than be deleted; an addon is staged across a
-fleet and started later, which is impossible today because offering a package
-activates it; a misbehaving addon needs stopping without a round trip through
-the download server to restart it.
-
-This should be proposed to opamp-spec only once addon support exists upstream,
-so the field has a reference implementation behind it. Note that the state is
-meaningful for executable addons and fuzzy for file addons, where "disabled" is
-hard to distinguish from configuration.
+  event, matching what the Supervisor does for the Collector.
 
 ## Relationship to #47272
 
-#47272 is implementing packages for the **top-level** package, to upgrade the
+#47272 implements packages for the **top-level** package, to upgrade the
 Collector binary. Four of its seven steps are merged, most recently the Cosign
 verifier (#50707, 2026-10-28). The remaining three are unclaimed: **package
 manager**, **binary update orchestration** and **e2e and finalization**.
 
-This PoC's `packages.go` overlaps step 5. It is not proposed as step 5. The
-intent is a parallel addon track that consumes step 5's package manager rather
-than a competing implementation:
+This PoC's `packages.go` overlaps step 5 and is not proposed as step 5. The
+intent is a parallel addon track that consumes step 5's package manager:
 
-- Step 5 implements the `types.PackagesStateProvider` stubs for the top-level
-  package. The version here is a stand-in so the addon path is runnable today;
-  it should be discarded in favour of step 5's.
-- Addons need no part of step 6. There is no binary to swap atomically and no
-  rollback of a running Collector, so the addon track can land before step 6
-  and does not sit behind the hardest part of the epic.
-- What addons add on top of step 5 is: whole-tree extraction, the addon
-  manifest, process supervision for executable addons, and `role`-based config
-  routing. Those are additive and touch different files.
+- Step 5 implements the `types.PackagesStateProvider` stubs. The version here is
+  a stand-in so the addon path runs today and should give way to step 5's. The
+  ask of step 5 is that it not assume a single top-level package, and that it
+  delegate `PackageType_Addon` to the addon manager.
+- Addons need no part of step 6: no binary to swap atomically and no rollback of
+  a running Collector, so the addon track can land before it.
+- What the addon track adds is additive and in separate files: the type
+  framework, the built-in types, the process supervisor, role routing and the
+  coordinated restart.
 
-Two findings here are useful to #47272 regardless: the `Commander` signal and
-process-group problem (finding 4), which step 6 will hit when it supervises a
-swapped binary, and the single-binary limitation of the step 4 extractor
-(finding 3).
+Findings 3 and 4 matter to #47272 directly: step 6 will supervise a swapped
+binary with `Commander`, and the step 4 extractor handles only a single named
+binary.
 
 ## Suggested sequencing
 
 1. Raise the parallel addon track on #47272 before writing more code, so step 5
    and the addon track agree on the provider boundary.
-2. Open the contrib issue for addon support, scoped to `file` and `executable`,
-   with the runtime boundary stated up front. No spec change required.
+2. Open the contrib issue for typed addon support with `file` and `jmx`, the
+   runtime boundary, and the no-generic-exec rule stated up front. No spec
+   change.
 3. Generalise process supervision (finding 4), usable by both tracks.
 4. Land `role` handling (finding 2) with the interoperability question answered.
-5. Only then propose enable/disable to opamp-spec.
+5. Distributions implement their own types against the framework; for Splunk,
+   `splunk_ta` with state carried in configuration.
+6. Revisit per-addon status reporting and, only if configuration-carried state
+   proves insufficient, a protocol-level enable/disable.

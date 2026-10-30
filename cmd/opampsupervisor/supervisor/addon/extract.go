@@ -135,15 +135,3 @@ func writeFile(r io.Reader, target string, mode os.FileMode) error {
 
 	return nil
 }
-
-// ReadManifest reads and parses the manifest from an extracted addon directory.
-func ReadManifest(addonDir string) (Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(addonDir, ManifestName))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Manifest{}, fmt.Errorf("addon package does not contain %s at its root", ManifestName)
-		}
-		return Manifest{}, fmt.Errorf("read %s: %w", ManifestName, err)
-	}
-	return ParseManifest(data)
-}

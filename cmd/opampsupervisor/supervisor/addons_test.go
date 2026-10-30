@@ -9,9 +9,11 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,457 +28,105 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/cmd/opampsupervisor/supervisor/config"
 )
 
-// addonFile is one file to place in a test addon package.
-type addonFile struct {
-	name string
-	body string
-	exec bool
-}
-
-// buildAddonPackage builds an addon package as a gzipped tarball.
-func buildAddonPackage(t *testing.T, files []addonFile) []byte {
-	t.Helper()
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-
-	for _, f := range files {
-		mode := int64(0o600)
-		if f.exec {
-			mode = 0o755
-		}
-		require.NoError(t, tw.WriteHeader(&tar.Header{
-			Name:     f.name,
-			Mode:     mode,
-			Size:     int64(len(f.body)),
-			Typeflag: tar.TypeReg,
-		}))
-		_, err := tw.Write([]byte(f.body))
-		require.NoError(t, err)
-	}
-
-	require.NoError(t, tw.Close())
-	require.NoError(t, gz.Close())
-	return buf.Bytes()
-}
-
-// newAddonTestSupervisor returns a Supervisor with package storage and an addon
-// registry wired up, as NewSupervisor does when accepts_packages is enabled.
-func newAddonTestSupervisor(t *testing.T) *Supervisor {
+// newAddonTestSupervisor returns a Supervisor with package storage and the addon
+// manager wired up, as NewSupervisor does when accepts_packages is enabled.
+// extra are registered the way a distribution registers its own addon types.
+func newAddonTestSupervisor(t *testing.T, extra ...addon.Factory) *Supervisor {
 	t.Helper()
 
 	cfg := config.DefaultSupervisor()
 	cfg.Storage.Directory = t.TempDir()
 	cfg.Capabilities.AcceptsPackages = true
+	cfg.Capabilities.AcceptsRemoteConfig = true
+
+	return newAddonTestSupervisorWithConfig(t, cfg, extra...)
+}
+
+func newAddonTestSupervisorWithConfig(t *testing.T, cfg config.Supervisor, extra ...addon.Factory) *Supervisor {
+	t.Helper()
 
 	s := &Supervisor{
 		config:            cfg,
 		telemetrySettings: newNopTelemetrySettings(),
 		persistentState:   &persistentState{InstanceID: uuid.New()},
+		hasNewConfig:      make(chan struct{}, 1),
 	}
-	s.addons = addon.NewRegistry(zap.NewNop())
 
 	var err error
-	s.packages, err = newPackageManager(
-		zap.NewNop(),
-		filepath.Join(cfg.Storage.Directory, packagesDirName),
-		s.addons,
-	)
+	s.addons, err = addon.NewManager(zap.NewNop(), append(builtinAddonFactories(), extra...)...)
+	require.NoError(t, err)
+	s.packages, err = newPackageManager(zap.NewNop(), filepath.Join(cfg.Storage.Directory, packagesDirName), s.addons)
 	require.NoError(t, err)
 
+	t.Cleanup(func() { s.stopAddons(context.Background()) })
 	return s
 }
 
-// installPackage drives the packageManager through the same call sequence the
-// opamp-go PackagesSyncer uses when it installs a package, so the PoC is
-// exercised the way the real client drives it.
-func installPackage(t *testing.T, p *packageManager, name string, typ protobufs.PackageType, content []byte, version string) {
-	t.Helper()
-
+// installPackage drives the packageManager through the call sequence the
+// opamp-go PackagesSyncer uses, so the PoC is exercised the way the real client
+// drives it. It returns the error the syncer would report as INSTALL_FAILED.
+func installPackage(p *packageManager, name string, typ protobufs.PackageType, content []byte, downloadURL, version string) error {
 	state, err := p.PackageState(name)
-	require.NoError(t, err)
-
+	if err != nil {
+		return err
+	}
 	if !state.Exists {
-		require.NoError(t, p.CreatePackage(name, typ))
+		if err := p.CreatePackage(name, typ); err != nil {
+			return err
+		}
 	}
 
 	sum := sha256.Sum256(content)
-
-	// The syncer skips the download when the stored file already matches.
 	existing, err := p.FileContentHash(name)
-	require.NoError(t, err)
-	if bytes.Equal(existing, sum[:]) {
-		return
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(existing, sum[:]) {
+		if err := p.UpdateContent(context.Background(), name, downloadURL, bytes.NewReader(content), sum[:], nil); err != nil {
+			return err
+		}
 	}
 
-	require.NoError(t, p.UpdateContent(
-		context.Background(), name, "https://example.invalid/"+name+".tar.gz",
-		bytes.NewReader(content), sum[:], nil,
-	))
-
-	require.NoError(t, p.SetPackageState(name, types.PackageState{
-		Exists:  true,
-		Type:    typ,
-		Hash:    []byte("package-hash-" + version),
-		Version: version,
-	}))
-}
-
-// TestAddonLifecycle walks an executable addon through install, configure, run,
-// reconfigure and delete. It is the end-to-end proof for the PoC: a package
-// offered over OpAMP becomes a supervised process that reads configuration
-// delivered as remote config, and stops when the package goes away.
-func TestAddonLifecycle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the test addon is a shell script")
-	}
-
-	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
-
-	// The addon writes the config it was given to a marker file and then idles,
-	// which lets the test observe both that it ran and what config it saw.
-	script := `#!/bin/sh
-cat "$OPAMP_ADDON_CONFIG" > "$OPAMP_ADDON_DIR/observed-config"
-while true; do sleep 0.05; done
-`
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: executable\nentrypoint: [\"./run.sh\"]\nconfig_file: addon.properties\n"},
-		{name: "run.sh", body: script, exec: true},
+	return p.SetPackageState(name, types.PackageState{
+		Exists: true, Type: typ, Hash: []byte("package-hash-" + version), Version: version,
 	})
-
-	installPackage(t, s.packages, "jmx-scraper", protobufs.PackageType_PackageType_Addon, pkg, "1.0.0")
-
-	// The package is recorded and the addon is registered.
-	state, err := s.packages.PackageState("jmx-scraper")
-	require.NoError(t, err)
-	assert.True(t, state.Exists)
-	assert.Equal(t, "1.0.0", state.Version)
-	assert.Equal(t, []string{"jmx-scraper"}, s.addons.Names())
-
-	installed, ok := s.addons.Get("jmx-scraper")
-	require.True(t, ok)
-	assert.True(t, installed.IsExecutable())
-
-	// Configuration arrives as a remote config entry whose role marks it as addon
-	// config and whose key names the addon.
-	require.NoError(t, s.applyAddonConfigs(ctx, addonRemoteConfig(map[string]string{
-		"jmx-scraper": "otel.jmx.target.system=tomcat\n",
-	})))
-
-	assert.FileExists(t, installed.ConfigPath())
-	body, err := os.ReadFile(installed.ConfigPath())
-	require.NoError(t, err)
-	assert.Equal(t, "otel.jmx.target.system=tomcat\n", string(body))
-
-	// Starting the addon runs the entrypoint, which observes its config.
-	require.NoError(t, s.addons.StartAll(ctx))
-	assert.True(t, installed.IsRunning())
-	assert.NotZero(t, installed.Pid())
-
-	observed := filepath.Join(installed.Dir(), "observed-config")
-	requireEventuallyFileContains(t, observed, "otel.jmx.target.system=tomcat")
-
-	firstPid := installed.Pid()
-
-	// A configuration change restarts a running addon so it rereads its config.
-	require.NoError(t, os.Remove(observed))
-	require.NoError(t, s.applyAddonConfigs(ctx, addonRemoteConfig(map[string]string{
-		"jmx-scraper": "otel.jmx.target.system=kafka\n",
-	})))
-
-	assert.True(t, installed.IsRunning())
-	assert.NotEqual(t, firstPid, installed.Pid(), "addon should have been restarted")
-	requireEventuallyFileContains(t, observed, "otel.jmx.target.system=kafka")
-
-	// Unchanged configuration must not restart it: a no-op offer should not
-	// interrupt data collection.
-	stablePid := installed.Pid()
-	require.NoError(t, s.applyAddonConfigs(ctx, addonRemoteConfig(map[string]string{
-		"jmx-scraper": "otel.jmx.target.system=kafka\n",
-	})))
-	assert.Equal(t, stablePid, installed.Pid(), "unchanged config should not restart the addon")
-
-	// Deleting the package stops the process and removes its files, which is what
-	// the syncer does for a package the server no longer offers.
-	addonDir := installed.Dir()
-	require.NoError(t, s.packages.DeletePackage("jmx-scraper"))
-
-	assert.False(t, installed.IsRunning())
-	assert.Empty(t, s.addons.Names())
-	assert.NoDirExists(t, addonDir)
-
-	names, err := s.packages.Packages()
-	require.NoError(t, err)
-	assert.Empty(t, names)
 }
 
-// TestAddonUpgradeReplacesProcess checks that offering a new version of an
-// installed addon stops the old process and starts the new content, which is
-// the case the staged-upgrade discussions turn on.
-func TestAddonUpgradeReplacesProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the test addon is a shell script")
-	}
-
-	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
-
-	makePkg := func(version string) []byte {
-		return buildAddonPackage(t, []addonFile{
-			{name: addon.ManifestName, body: "type: executable\nentrypoint: [\"./run.sh\"]\n"},
-			{name: "run.sh", body: "#!/bin/sh\necho " + version + " > \"$OPAMP_ADDON_DIR/version\"\nwhile true; do sleep 0.05; done\n", exec: true},
-		})
-	}
-
-	installPackage(t, s.packages, "scraper", protobufs.PackageType_PackageType_Addon, makePkg("v1"), "1.0.0")
-	require.NoError(t, s.addons.StartAll(ctx))
-
-	first, ok := s.addons.Get("scraper")
-	require.True(t, ok)
-	requireEventuallyFileContains(t, filepath.Join(first.Dir(), "version"), "v1")
-	firstPid := first.Pid()
-	require.NotZero(t, firstPid)
-
-	// Upgrade.
-	installPackage(t, s.packages, "scraper", protobufs.PackageType_PackageType_Addon, makePkg("v2"), "2.0.0")
-
-	// The old process must be gone, and the registry must now hold the new addon.
-	assert.False(t, first.IsRunning(), "previous addon process should be stopped on upgrade")
-
-	second, ok := s.addons.Get("scraper")
-	require.True(t, ok)
-	assert.NotSame(t, first, second, "registry should hold the upgraded addon")
-
-	require.NoError(t, s.addons.StartAll(ctx))
-	requireEventuallyFileContains(t, filepath.Join(second.Dir(), "version"), "v2")
-	assert.NotEqual(t, firstPid, second.Pid())
-
-	state, err := s.packages.PackageState("scraper")
-	require.NoError(t, err)
-	assert.Equal(t, "2.0.0", state.Version)
-
-	require.NoError(t, s.addons.StopAll(ctx))
+// setAddonConfigs stores a remote config carrying only addon configuration, as
+// processRemoteConfigMessage does.
+func setAddonConfigs(s *Supervisor, configs map[string]string) {
+	s.remoteConfig.Store(addonRemoteConfig(configs))
 }
 
-// TestAddonContentHashMismatchRejected checks that content failing its offered
-// hash is never extracted or run.
-func TestAddonContentHashMismatchRejected(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: file\n"},
-	})
-
-	require.NoError(t, s.packages.CreatePackage("bad", protobufs.PackageType_PackageType_Addon))
-
-	err := s.packages.UpdateContent(
-		context.Background(), "bad", "https://example.invalid/bad.tar.gz",
-		bytes.NewReader(pkg), []byte("not-the-right-hash"), nil,
-	)
-	require.ErrorContains(t, err, "content hash mismatch")
-
-	assert.Empty(t, s.addons.Names(), "a package failing verification must not be registered")
-	assert.NoDirExists(t, s.packages.AddonDir("bad"))
-}
-
-// TestAddonMalformedPackageLeavesPreviousInstalled checks that a bad offer
-// cannot take down a working addon.
-func TestAddonMalformedPackageLeavesPreviousInstalled(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-
-	good := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: file\n"},
-		{name: "data.txt", body: "original"},
-	})
-	installPackage(t, s.packages, "files", protobufs.PackageType_PackageType_Addon, good, "1.0.0")
-	require.Len(t, s.addons.Names(), 1)
-
-	// A package with no manifest is not a usable addon.
-	bad := buildAddonPackage(t, []addonFile{{name: "data.txt", body: "replaced"}})
-	sum := sha256.Sum256(bad)
-	err := s.packages.UpdateContent(
-		context.Background(), "files", "https://example.invalid/files.tar.gz",
-		bytes.NewReader(bad), sum[:], nil,
-	)
-	require.ErrorContains(t, err, addon.ManifestName)
-
-	// The previously installed content must still be there.
-	body, readErr := os.ReadFile(filepath.Join(s.packages.AddonDir("files"), "data.txt"))
-	require.NoError(t, readErr)
-	assert.Equal(t, "original", string(body))
-}
-
-// TestExecutableAddonMissingRuntimeFailsDeterministically covers the objection
-// that moving a Java addon to the Supervisor does not make a JVM appear: a host
-// without the runtime must fail with a clear, non-retryable reason rather than
-// looking broken.
-func TestExecutableAddonMissingRuntimeFailsDeterministically(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
-
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: executable\nentrypoint: [definitely-not-installed-runtime, -jar, scraper.jar]\n"},
-	})
-	installPackage(t, s.packages, "needs-runtime", protobufs.PackageType_PackageType_Addon, pkg, "1.0.0")
-
-	installed, ok := s.addons.Get("needs-runtime")
-	require.True(t, ok)
-
-	err := installed.Start(ctx)
-	require.ErrorIs(t, err, addon.ErrRuntimeNotFound)
-	require.ErrorContains(t, err, "definitely-not-installed-runtime")
-	require.ErrorContains(t, err, "must be installed on the host")
-	assert.False(t, installed.IsRunning())
-}
-
-// TestFileAddonIsNotRun checks that a file addon occupies a directory and
-// nothing more. This is the geoipprocessor case: the Collector reads the file,
-// the Supervisor runs nothing.
-func TestFileAddonIsNotRun(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
-
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: file\n"},
-		{name: "GeoLite2-City.mmdb", body: "pretend-database"},
-	})
-	installPackage(t, s.packages, "geoip-db", protobufs.PackageType_PackageType_Addon, pkg, "2026.10.28")
-
-	installed, ok := s.addons.Get("geoip-db")
-	require.True(t, ok)
-	assert.False(t, installed.IsExecutable())
-
-	require.NoError(t, s.addons.StartAll(ctx))
-	assert.False(t, installed.IsRunning(), "a file addon must not start a process")
-	assert.Zero(t, installed.Pid())
-
-	// The extracted path is what a Collector config would point at.
-	assert.FileExists(t, filepath.Join(installed.Dir(), "GeoLite2-City.mmdb"))
-}
-
-// TestAddonStateSurvivesRestart checks that a restarted Supervisor adopts the
-// addons it installed previously instead of waiting to be re-offered them.
-func TestAddonStateSurvivesRestart(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
-
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: "type: file\n"},
-		{name: "data.txt", body: "persisted"},
-	})
-	installPackage(t, s.packages, "files", protobufs.PackageType_PackageType_Addon, pkg, "1.0.0")
-	require.NoError(t, s.packages.SetAllPackagesHash([]byte("all-hash")))
-
-	// A new packageManager over the same directory is what a restart looks like.
-	restartedRegistry := addon.NewRegistry(zap.NewNop())
-	restarted, err := newPackageManager(
-		zap.NewNop(),
-		filepath.Join(s.config.Storage.Directory, packagesDirName),
-		restartedRegistry,
-	)
-	require.NoError(t, err)
-
-	hash, err := restarted.AllPackagesHash()
-	require.NoError(t, err)
-	assert.Equal(t, []byte("all-hash"), hash)
-
-	state, err := restarted.PackageState("files")
-	require.NoError(t, err)
-	assert.True(t, state.Exists)
-	assert.Equal(t, "1.0.0", state.Version)
-
-	// The stored content hash must still match, so a restarted Supervisor does
-	// not re-download what it already has.
-	sum := sha256.Sum256(pkg)
-	storedHash, err := restarted.FileContentHash("files")
-	require.NoError(t, err)
-	assert.Equal(t, sum[:], storedHash)
-
-	require.NoError(t, restarted.loadInstalledAddons(ctx))
-	assert.Equal(t, []string{"files"}, restartedRegistry.Names())
-}
-
-// TestLastReportedStatusesRoundTrip checks the statuses a restarted Supervisor
-// reports are the ones it saved.
-func TestLastReportedStatusesRoundTrip(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-
-	// Nothing saved yet must not be an error: it is the first run.
-	statuses, err := s.packages.LastReportedStatuses()
-	require.NoError(t, err)
-	assert.Empty(t, statuses.GetPackages())
-
-	require.NoError(t, s.packages.SetLastReportedStatuses(&protobufs.PackageStatuses{
-		ServerProvidedAllPackagesHash: []byte("offer-hash"),
-		Packages: map[string]*protobufs.PackageStatus{
-			"jmx-scraper": {
-				Name:            "jmx-scraper",
-				AgentHasVersion: "1.0.0",
-				Status:          protobufs.PackageStatusEnum_PackageStatusEnum_Installed,
-			},
-		},
-	}))
-
-	statuses, err = s.packages.LastReportedStatuses()
-	require.NoError(t, err)
-	assert.Equal(t, []byte("offer-hash"), statuses.GetServerProvidedAllPackagesHash())
-	require.Contains(t, statuses.GetPackages(), "jmx-scraper")
-	assert.Equal(t,
-		protobufs.PackageStatusEnum_PackageStatusEnum_Installed,
-		statuses.GetPackages()["jmx-scraper"].GetStatus())
-}
-
-// TestAddonConfigIsNotMergedIntoCollectorConfig is the core of the config
-// routing question: an addon config entry must not reach the Collector's
-// configuration, which it would corrupt.
-func TestAddonConfigIsNotMergedIntoCollectorConfig(t *testing.T) {
-	s := newAddonTestSupervisor(t)
-	s.config.Capabilities.AcceptsRemoteConfig = true
-
-	collectorConfig := "receivers:\n  nop:\n"
-	addonConfig := "otel.jmx.target.system=tomcat\n"
-
-	remoteConfig := &protobufs.AgentRemoteConfig{
-		Config: &protobufs.AgentConfigMap{
-			ConfigMap: map[string]*protobufs.AgentConfigObject{
-				"collector.yaml": {Body: []byte(collectorConfig), ContentType: "text/yaml"},
-				"jmx-scraper": {
-					Body:        []byte(addonConfig),
-					ContentType: "text/plain",
-					Role:        addonConfigRole,
-				},
-			},
-		},
-	}
-
-	var composed []byte
-	for _, compose := range s.createRemoteConfigComposers(remoteConfig) {
-		composed = append(composed, compose()...)
-	}
-
-	assert.Contains(t, string(composed), "nop", "collector config should be merged")
-	assert.NotContains(t, string(composed), "otel.jmx.target.system",
-		"addon config must not be merged into the collector config")
-}
-
-// addonRemoteConfig builds a remote config carrying only addon configuration.
 func addonRemoteConfig(configs map[string]string) *protobufs.AgentRemoteConfig {
 	configMap := map[string]*protobufs.AgentConfigObject{}
 	for name, body := range configs {
-		configMap[name] = &protobufs.AgentConfigObject{
-			Body:        []byte(body),
-			ContentType: "text/plain",
-			Role:        addonConfigRole,
-		}
+		configMap[name] = &protobufs.AgentConfigObject{Body: []byte(body), ContentType: "text/plain", Role: addonConfigRole}
 	}
-	return &protobufs.AgentRemoteConfig{
-		Config: &protobufs.AgentConfigMap{ConfigMap: configMap},
-	}
+	return &protobufs.AgentRemoteConfig{Config: &protobufs.AgentConfigMap{ConfigMap: configMap}}
 }
 
-// requireEventuallyFileContains waits for path to exist and contain want.
+func tarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(body)), Typeflag: tar.TypeReg}))
+		_, err := tw.Write([]byte(body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	return buf.Bytes()
+}
+
+// restartSignals returns how many Collector restarts are pending. The channel
+// coalesces, so this is 0 or 1.
+func restartSignals(s *Supervisor) int {
+	return len(s.hasNewConfig)
+}
+
 func requireEventuallyFileContains(t *testing.T, path, want string) {
 	t.Helper()
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -487,3 +137,490 @@ func requireEventuallyFileContains(t *testing.T, path, want string) {
 		assert.Contains(c, string(body), want)
 	}, 10*time.Second, 25*time.Millisecond, "waiting for %s to contain %q", path, want)
 }
+
+type runningAddon interface {
+	IsRunning() bool
+	Pid() int
+}
+
+// --- jmx: the anchor use case ---
+
+// fakeJar is the minimum content the jmx type accepts as a jar.
+func fakeJar(version string) []byte {
+	return append([]byte("PK\x03\x04"), []byte("scraper "+version)...)
+}
+
+// installFakeJava puts a stand-in JVM on JAVA_HOME that records the config it
+// was given and idles like a running scraper.
+func installFakeJava(t *testing.T) (observedConfig string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake JVM is a shell script")
+	}
+	home := t.TempDir()
+	observed := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "bin"), 0o700))
+	script := `#!/bin/sh
+for last; do :; done
+cp "$last" "` + observed + `/config"
+while true; do sleep 0.05; done
+`
+	require.NoError(t, os.WriteFile(filepath.Join(home, "bin", "java"), []byte(script), 0o700))
+	t.Setenv("JAVA_HOME", home)
+	return filepath.Join(observed, "config")
+}
+
+// TestJMXAddonThroughSupervisor walks the scraper through the Supervisor:
+// offered as "jmx:tomcat" with the jar as-is, configured by a remote config
+// entry under the same key, run, reconfigured, and deleted.
+func TestJMXAddonThroughSupervisor(t *testing.T) {
+	observed := installFakeJava(t)
+	s := newAddonTestSupervisor(t)
+	ctx := context.Background()
+
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("1.61.0"), "https://github.com/open-telemetry/opentelemetry-java-contrib/releases/download/v1.61.0/opentelemetry-jmx-scraper.jar", "1.61.0"))
+
+	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
+	assert.False(t, s.reconcileAddons(ctx), "a scraper never needs a Collector restart")
+
+	a, dir, ok := s.addons.Get("jmx:tomcat")
+	require.True(t, ok)
+	scraper := a.(runningAddon)
+	require.True(t, scraper.IsRunning())
+	requireEventuallyFileContains(t, observed, "otel.jmx.target.system=tomcat")
+	firstPid := scraper.Pid()
+
+	// An unchanged offer does not touch the running scraper.
+	s.reconcileAddons(ctx)
+	assert.Equal(t, firstPid, scraper.Pid())
+
+	// A changed one restarts it.
+	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=kafka\n"})
+	s.reconcileAddons(ctx)
+	assert.NotEqual(t, firstPid, scraper.Pid())
+	requireEventuallyFileContains(t, observed, "otel.jmx.target.system=kafka")
+	assert.Zero(t, restartSignals(s))
+
+	// Deleting the package stops the scraper and removes it.
+	require.NoError(t, s.packages.DeletePackage("jmx:tomcat"))
+	assert.False(t, scraper.IsRunning())
+	assert.NoDirExists(t, dir)
+	assert.Empty(t, s.addons.Names())
+}
+
+// TestJMXAddonWithoutJavaReportsInstallFailure checks that the runtime boundary
+// surfaces where the server can see it.
+func TestJMXAddonWithoutJavaReportsInstallFailure(t *testing.T) {
+	t.Setenv("JAVA_HOME", "")
+	t.Setenv("PATH", t.TempDir())
+	s := newAddonTestSupervisor(t)
+
+	err := installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1")
+	require.ErrorIs(t, err, addon.ErrRuntimeNotFound)
+	assert.Empty(t, s.addons.Names())
+	assert.NoDirExists(t, s.packages.AddonDir("jmx:tomcat"))
+}
+
+func TestJMXAddonUpgradeReplacesProcess(t *testing.T) {
+	installFakeJava(t)
+	s := newAddonTestSupervisor(t)
+	ctx := context.Background()
+	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
+
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1.0.0"))
+	s.reconcileAddons(ctx)
+	first, _, _ := s.addons.Get("jmx:tomcat")
+	require.True(t, first.(runningAddon).IsRunning())
+
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("2"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "2.0.0"))
+	assert.False(t, first.(runningAddon).IsRunning(), "the previous scraper must be stopped before its files are replaced")
+
+	s.reconcileAddons(ctx)
+	second, _, _ := s.addons.Get("jmx:tomcat")
+	assert.NotSame(t, first, second)
+	assert.True(t, second.(runningAddon).IsRunning(), "the upgraded scraper must be configured and started")
+
+	state, err := s.packages.PackageState("jmx:tomcat")
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", state.Version)
+}
+
+// --- file ---
+
+func TestFileAddonThroughSupervisor(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+
+	require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
+		[]byte("pretend-database"), "https://example.invalid/GeoLite2-City.mmdb", "2026.10.28"))
+
+	assert.False(t, s.reconcileAddons(context.Background()))
+	_, dir, ok := s.addons.Get("file:geoip")
+	require.True(t, ok)
+	// This path is what a geoipprocessor database_path points at.
+	assert.FileExists(t, filepath.Join(dir, "GeoLite2-City.mmdb"))
+}
+
+// --- framework behaviour ---
+
+// TestUnsupportedAddonTypeRejectedBeforeDownload checks that the Supervisor
+// refuses an addon type it was not built with, before fetching anything. The
+// server can only choose among types the Supervisor supports.
+func TestUnsupportedAddonTypeRejectedBeforeDownload(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+
+	err := s.packages.CreatePackage("splunk_ta:unix", protobufs.PackageType_PackageType_Addon)
+	require.ErrorContains(t, err, `unsupported addon type "splunk_ta"`)
+
+	err = s.packages.CreatePackage("no-type", protobufs.PackageType_PackageType_Addon)
+	require.ErrorContains(t, err, `must have the form "<type>:<name>"`)
+
+	names, err := s.packages.Packages()
+	require.NoError(t, err)
+	assert.Empty(t, names)
+
+	// Top-level packages are not addons and are not subject to the naming rule.
+	require.NoError(t, s.packages.CreatePackage("", protobufs.PackageType_PackageType_TopLevel))
+}
+
+func TestAddonContentHashMismatchRejected(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+	require.NoError(t, s.packages.CreatePackage("file:bad", protobufs.PackageType_PackageType_Addon))
+
+	err := s.packages.UpdateContent(context.Background(), "file:bad", "https://example.invalid/bad.mmdb",
+		bytes.NewReader([]byte("x")), []byte("not-the-right-hash"), nil)
+	require.ErrorContains(t, err, "content hash mismatch")
+	assert.Empty(t, s.addons.Names())
+	assert.NoDirExists(t, s.packages.AddonDir("file:bad"))
+}
+
+func TestFailedInstallLeavesPreviousVersion(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+	require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
+		tarGz(t, map[string]string{"db.mmdb": "original"}), "https://example.invalid/geoip.tar.gz", "1"))
+
+	// Not a gzip stream, though the URL says it is.
+	err := installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
+		[]byte("corrupt"), "https://example.invalid/geoip.tar.gz", "2")
+	require.ErrorContains(t, err, "gzip")
+
+	body, readErr := os.ReadFile(filepath.Join(s.packages.AddonDir("file:geoip"), "db.mmdb"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(body))
+	_, _, ok := s.addons.Get("file:geoip")
+	assert.True(t, ok)
+}
+
+// TestAddonsSurviveRestart checks that a restarted Supervisor adopts its
+// installed addons and runs them against the persisted config, before the
+// Collector starts and without waiting to be re-offered anything.
+func TestAddonsSurviveRestart(t *testing.T) {
+	installFakeJava(t)
+	s := newAddonTestSupervisor(t)
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
+	require.NoError(t, s.packages.SetAllPackagesHash([]byte("all-hash")))
+	s.stopAddons(context.Background())
+
+	restarted := newAddonTestSupervisorWithConfig(t, s.config)
+	setAddonConfigs(restarted, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
+	restarted.startAddons(context.Background())
+
+	a, _, ok := restarted.addons.Get("jmx:tomcat")
+	require.True(t, ok)
+	assert.True(t, a.(runningAddon).IsRunning())
+	assert.Zero(t, restartSignals(restarted), "startup reconciliation runs before the Collector starts")
+
+	hash, err := restarted.packages.AllPackagesHash()
+	require.NoError(t, err)
+	assert.Equal(t, []byte("all-hash"), hash)
+}
+
+func TestShutdownStopsAddons(t *testing.T) {
+	installFakeJava(t)
+	s := newAddonTestSupervisor(t)
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
+		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
+	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
+	s.reconcileAddons(context.Background())
+
+	a, _, _ := s.addons.Get("jmx:tomcat")
+	require.True(t, a.(runningAddon).IsRunning())
+	s.stopAddons(context.Background())
+	assert.False(t, a.(runningAddon).IsRunning(), "the Supervisor must not leave orphaned addon processes")
+}
+
+func TestLastReportedStatusesRoundTrip(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+
+	statuses, err := s.packages.LastReportedStatuses()
+	require.NoError(t, err)
+	assert.Empty(t, statuses.GetPackages())
+
+	require.NoError(t, s.packages.SetLastReportedStatuses(&protobufs.PackageStatuses{
+		ServerProvidedAllPackagesHash: []byte("offer-hash"),
+		Packages: map[string]*protobufs.PackageStatus{
+			"jmx:tomcat": {Name: "jmx:tomcat", AgentHasVersion: "1.0.0", Status: protobufs.PackageStatusEnum_PackageStatusEnum_Installed},
+		},
+	}))
+
+	statuses, err = s.packages.LastReportedStatuses()
+	require.NoError(t, err)
+	assert.Equal(t, []byte("offer-hash"), statuses.GetServerProvidedAllPackagesHash())
+	assert.Equal(t, protobufs.PackageStatusEnum_PackageStatusEnum_Installed, statuses.GetPackages()["jmx:tomcat"].GetStatus())
+}
+
+// TestAddonConfigIsNotMergedIntoCollectorConfig checks that addon config,
+// selected by role, never reaches the Collector's configuration.
+func TestAddonConfigIsNotMergedIntoCollectorConfig(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+
+	remoteConfig := &protobufs.AgentRemoteConfig{Config: &protobufs.AgentConfigMap{ConfigMap: map[string]*protobufs.AgentConfigObject{
+		"collector.yaml": {Body: []byte("receivers:\n  nop:\n"), ContentType: "text/yaml"},
+		"jmx:tomcat":     {Body: []byte("otel.jmx.target.system=tomcat\n"), ContentType: "text/plain", Role: addonConfigRole},
+		// A Collector config entry whose key merely looks like an addon name is
+		// still Collector config: the role decides, not the key.
+		"file:base.yaml": {Body: []byte("exporters:\n  nop:\n"), ContentType: "text/yaml"},
+	}}}
+
+	var composed []byte
+	for _, compose := range s.createRemoteConfigComposers(remoteConfig) {
+		composed = append(composed, compose()...)
+	}
+	assert.Contains(t, string(composed), "receivers")
+	assert.Contains(t, string(composed), "exporters", "a key shaped like an addon name without the role is Collector config")
+	assert.NotContains(t, string(composed), "otel.jmx.target.system")
+
+	assert.Equal(t, map[string][]byte{"jmx:tomcat": []byte("otel.jmx.target.system=tomcat\n")}, addonConfigs(remoteConfig))
+}
+
+// --- distribution-defined type ---
+
+// splunkTAFactory is the shape of an addon type a distribution registers with
+// WithAddonFactories. A Splunk TA is read by the Collector itself rather than
+// run as a process, so applying a change requires restarting the Collector,
+// which is what Effect.RestartAgent is for. The real implementation belongs in
+// the distribution; this one only models the parts the framework touches.
+type splunkTAFactory struct{}
+
+func (splunkTAFactory) Type() addon.Type { return "splunk_ta" }
+
+func (splunkTAFactory) Install(_ context.Context, set addon.InstallSettings) error {
+	return addon.ExtractTarGz(set.Content, set.Dir)
+}
+
+func (splunkTAFactory) Create(_ context.Context, set addon.Settings) (addon.Addon, error) {
+	return &splunkTA{dir: set.Dir}, nil
+}
+
+type splunkTA struct {
+	dir        string
+	registered bool
+	state      string
+}
+
+// Configure takes the TA's state ("enabled" or "disabled") from its config
+// entry and writes it where the Collector reads it.
+func (ta *splunkTA) Configure(_ context.Context, body []byte) (addon.Effect, error) {
+	state := "enabled"
+	if body != nil {
+		state = strings.TrimSpace(string(body))
+	}
+	if state != "enabled" && state != "disabled" {
+		return addon.Effect{}, fmt.Errorf("unknown TA state %q", state)
+	}
+	if state == ta.state {
+		return addon.Effect{}, nil
+	}
+	ta.state = state
+	if err := os.MkdirAll(filepath.Join(ta.dir, "local"), 0o700); err != nil {
+		return addon.Effect{}, err
+	}
+	conf := "[install]\nstate = " + state + "\n"
+	if err := os.WriteFile(filepath.Join(ta.dir, "local", "app.conf"), []byte(conf), 0o600); err != nil {
+		return addon.Effect{}, err
+	}
+	// A state change on a TA the Collector already loaded takes a restart.
+	return addon.Effect{RestartAgent: ta.registered}, nil
+}
+
+// Start registers the TA with the Collector the first time.
+func (ta *splunkTA) Start(context.Context) (addon.Effect, error) {
+	if ta.registered {
+		return addon.Effect{}, nil
+	}
+	ta.registered = true
+	return addon.Effect{RestartAgent: true}, nil
+}
+
+func (*splunkTA) Shutdown(context.Context) error { return nil }
+
+// gatedSyncer stands in for the opamp-go PackagesSyncer: its sync runs only
+// once the test releases the gate, so the test can observe the Supervisor
+// before and after the packages are in place.
+type gatedSyncer struct {
+	gate chan struct{}
+	sync func()
+	done chan struct{}
+}
+
+func newGatedSyncer(sync func()) *gatedSyncer {
+	return &gatedSyncer{gate: make(chan struct{}), sync: sync, done: make(chan struct{})}
+}
+
+func (g *gatedSyncer) Sync(context.Context) error {
+	go func() {
+		<-g.gate
+		g.sync()
+		close(g.done)
+	}()
+	return nil
+}
+
+func (g *gatedSyncer) Done() <-chan struct{} { return g.done }
+
+func TestDistributionRegistersAddonType(t *testing.T) {
+	s := newAddonTestSupervisor(t, splunkTAFactory{})
+	assert.Equal(t, []addon.Type{"file", "jmx", "splunk_ta"}, s.addons.Types())
+
+	_, err := addon.NewManager(zap.NewNop(), append(builtinAddonFactories(), splunkTAFactory{}, splunkTAFactory{})...)
+	require.ErrorContains(t, err, "registered more than once")
+}
+
+// TestOneCollectorRestartPerMessage covers the ordering concern: a message that
+// changes the Collector config and installs a TA the Collector reads must
+// cause exactly one Collector restart, after the TA is in place, rather than
+// one restart with the old TAs and another with the new.
+func TestOneCollectorRestartPerMessage(t *testing.T) {
+	s := newAddonTestSupervisor(t, splunkTAFactory{})
+	ctx := context.Background()
+
+	// The same message carries the TA's state in the remote config.
+	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+
+	syncer := newGatedSyncer(func() {
+		require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
+			tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
+			"https://example.invalid/unix.tar.gz", "9.0.0"))
+	})
+
+	// restartPending: the Collector config changed in this message too.
+	s.syncPackages(ctx, syncer, true)
+
+	// While the package is still syncing, the Collector must not restart.
+	time.Sleep(100 * time.Millisecond)
+	assert.Zero(t, restartSignals(s), "the Collector must not restart before the TA is in place")
+
+	close(syncer.gate)
+	require.Eventually(t, func() bool { return restartSignals(s) == 1 }, 10*time.Second, 10*time.Millisecond)
+
+	// When the restart is signalled, the TA and its state are already on disk.
+	_, dir, ok := s.addons.Get("splunk_ta:unix")
+	require.True(t, ok)
+	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(conf), "state = disabled")
+}
+
+// TestAddonStateChangeRestartsCollectorOnce covers a state-only change to an
+// installed TA: no download, one restart.
+func TestAddonStateChangeRestartsCollectorOnce(t *testing.T) {
+	s := newAddonTestSupervisor(t, splunkTAFactory{})
+	ctx := context.Background()
+
+	require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
+		tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
+		"https://example.invalid/unix.tar.gz", "9.0.0"))
+	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "enabled"})
+	require.True(t, s.reconcileAddons(ctx), "registering a new TA needs a Collector restart")
+
+	// Same state again: nothing to do.
+	assert.False(t, s.reconcileAddons(ctx))
+
+	// Disable: the Collector must restart to stop reading the TA.
+	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+	assert.True(t, s.reconcileAddons(ctx))
+
+	_, dir, _ := s.addons.Get("splunk_ta:unix")
+	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(conf), "state = disabled")
+}
+
+// TestNoRestartWhenNothingChanged checks that a package offer carrying no
+// change to the Collector does not restart it.
+func TestNoRestartWhenNothingChanged(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+	syncer := newGatedSyncer(func() {
+		require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
+			[]byte("db"), "https://example.invalid/GeoLite2-City.mmdb", "1"))
+	})
+	close(syncer.gate)
+
+	s.syncPackages(context.Background(), syncer, false)
+	<-syncer.Done()
+	time.Sleep(100 * time.Millisecond)
+	assert.Zero(t, restartSignals(s))
+}
+
+// TestPackageDirIsSafeFileName pins the escaping of package names on disk. An
+// addon name always contains ":", which is illegal in Windows file names and is
+// the JVM's class path separator: a scraper jar under "jmx:tomcat/" fails to
+// load its main class. Only the real JVM surfaced this.
+func TestPackageDirIsSafeFileName(t *testing.T) {
+	s := newAddonTestSupervisor(t)
+	seen := map[string]string{}
+
+	for _, name := range []string{"jmx:tomcat", "splunk_ta:a/b", `file:x*y?<>|"`, "file:..", "file:a b", "file:a+b"} {
+		base := filepath.Base(s.packages.AddonDir(name))
+		require.Equal(t, packageFilesDir, base)
+		dirName := filepath.Base(filepath.Dir(s.packages.AddonDir(name)))
+
+		assert.NotContains(t, dirName, ":", name)
+		assert.NotContains(t, dirName, string(os.PathListSeparator), name)
+		assert.NotContains(t, dirName, "/", name)
+		assert.NotContains(t, dirName, `\`, name)
+		assert.NotEqual(t, "..", dirName, name)
+
+		// Distinct names must not collide on disk.
+		if other, ok := seen[dirName]; ok {
+			t.Fatalf("%q and %q map to the same directory %q", name, other, dirName)
+		}
+		seen[dirName] = name
+	}
+}
+
+// TestNewSupervisorRegistersAddonTypes checks the distribution hook through the
+// real constructor rather than a hand-built Supervisor.
+func TestNewSupervisorRegistersAddonTypes(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "otelcol")
+	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700))
+
+	cfg := config.DefaultSupervisor()
+	cfg.Server.Endpoint = "ws://localhost:4320/v1/opamp"
+	cfg.Storage.Directory = t.TempDir()
+	cfg.Agent.Executable = executable
+	cfg.Capabilities.AcceptsPackages = true
+
+	s, err := NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(splunkTAFactory{}))
+	require.NoError(t, err)
+	assert.Equal(t, []addon.Type{"file", "jmx", "splunk_ta"}, s.addons.Types())
+
+	// A distribution cannot replace a built-in type by registering it again.
+	_, err = NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(fileaddonDuplicate{}))
+	require.ErrorContains(t, err, `addon type "file" is registered more than once`)
+
+	// Without the packages capability nothing is wired, and no addon runs.
+	cfg.Capabilities.AcceptsPackages = false
+	s, err = NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(splunkTAFactory{}))
+	require.NoError(t, err)
+	assert.Nil(t, s.addons)
+	assert.Nil(t, s.packages)
+}
+
+type fileaddonDuplicate struct{ splunkTAFactory }
+
+func (fileaddonDuplicate) Type() addon.Type { return "file" }

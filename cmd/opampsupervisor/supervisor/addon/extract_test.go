@@ -63,16 +63,16 @@ func TestExtractTarGz(t *testing.T) {
 	dir := t.TempDir()
 
 	pkg := buildTarGz(t, []tarEntry{
-		{name: ManifestName, body: "type: file\n"},
+		{name: "README", body: "geo data\n"},
 		{name: "data/geo.mmdb", body: "binary-ish"},
 		{name: "run.sh", body: "#!/bin/sh\n", mode: 0o755},
 	})
 
 	require.NoError(t, ExtractTarGz(pkg, dir))
 
-	manifest, err := ReadManifest(dir)
+	readme, err := os.ReadFile(filepath.Join(dir, "README"))
 	require.NoError(t, err)
-	assert.Equal(t, TypeFile, manifest.Type)
+	assert.Equal(t, "geo data\n", string(readme))
 
 	body, err := os.ReadFile(filepath.Join(dir, "data", "geo.mmdb"))
 	require.NoError(t, err)
@@ -152,80 +152,4 @@ func TestExtractTarGzRejectsTooManyFiles(t *testing.T) {
 func TestExtractTarGzRejectsNonGzip(t *testing.T) {
 	err := ExtractTarGz([]byte("not a gzip stream"), t.TempDir())
 	require.ErrorContains(t, err, "create gzip reader")
-}
-
-func TestReadManifestMissing(t *testing.T) {
-	_, err := ReadManifest(t.TempDir())
-	require.ErrorContains(t, err, "does not contain "+ManifestName)
-}
-
-func TestParseManifest(t *testing.T) {
-	tests := []struct {
-		name          string
-		yaml          string
-		expected      Manifest
-		expectedError string
-	}{
-		{
-			name:     "file addon",
-			yaml:     "type: file\n",
-			expected: Manifest{Type: TypeFile},
-		},
-		{
-			name: "executable addon",
-			yaml: "type: executable\nentrypoint: [java, -jar, scraper.jar]\nconfig_file: scraper.properties\n",
-			expected: Manifest{
-				Type:       TypeExecutable,
-				Entrypoint: []string{"java", "-jar", "scraper.jar"},
-				ConfigFile: "scraper.properties",
-			},
-		},
-		{
-			name:          "missing type",
-			yaml:          "entrypoint: [java]\n",
-			expectedError: "type is required",
-		},
-		{
-			name:          "unsupported type",
-			yaml:          "type: container\n",
-			expectedError: `unsupported type "container"`,
-		},
-		{
-			name:          "executable without entrypoint",
-			yaml:          "type: executable\n",
-			expectedError: "entrypoint is required",
-		},
-		{
-			name:          "file with entrypoint",
-			yaml:          "type: file\nentrypoint: [java]\n",
-			expectedError: "entrypoint must not be set for a file addon",
-		},
-		{
-			name:          "config file escaping the addon dir",
-			yaml:          "type: file\nconfig_file: ../../etc/passwd\n",
-			expectedError: "must not escape the addon directory",
-		},
-		{
-			name:          "absolute config file",
-			yaml:          "type: file\nconfig_file: /etc/passwd\n",
-			expectedError: "must be relative to the addon directory",
-		},
-		{
-			name:          "malformed yaml",
-			yaml:          "type: [",
-			expectedError: "parse " + ManifestName,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manifest, err := ParseManifest([]byte(tt.yaml))
-			if tt.expectedError != "" {
-				require.ErrorContains(t, err, tt.expectedError)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, manifest)
-		})
-	}
 }

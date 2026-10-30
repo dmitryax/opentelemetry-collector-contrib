@@ -20,8 +20,6 @@ import (
 	"github.com/open-telemetry/opamp-go/protobufs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/open-telemetry/opentelemetry-collector-contrib/cmd/opampsupervisor/supervisor/addon"
 )
 
 // jmxScraperJarEnv names an environment variable holding the path to a
@@ -71,27 +69,20 @@ func TestJMXScraperAddonEndToEnd(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 	ctx := context.Background()
 
-	// The addon package is the real jar plus a manifest describing how to run
-	// it. The entrypoint resolves "java" on PATH, and the -config path is
-	// relative to the addon directory, which is the process's working
-	// directory.
-	manifest := `type: executable
-entrypoint: ["java", "-jar", "opentelemetry-jmx-scraper.jar", "-config", "scraper.properties"]
-config_file: scraper.properties
-`
-	pkg := buildAddonPackage(t, []addonFile{
-		{name: addon.ManifestName, body: manifest},
-		{name: "opentelemetry-jmx-scraper.jar", body: string(jar)},
-	})
+	// The package is the upstream release asset exactly as published: the jmx
+	// type knows how to run it, so there is no wrapper and no manifest.
+	const name = "jmx:tomcat"
+	require.NoError(t, installPackage(s.packages, name, protobufs.PackageType_PackageType_Addon, jar,
+		"https://github.com/open-telemetry/opentelemetry-java-contrib/releases/download/v1.61.0/opentelemetry-jmx-scraper.jar",
+		"1.61.0"))
 
-	installPackage(t, s.packages, "jmx-scraper", protobufs.PackageType_PackageType_Addon, pkg, "1.61.0")
-
-	installed, ok := s.addons.Get("jmx-scraper")
+	installedAddon, dir, ok := s.addons.Get(name)
 	require.True(t, ok)
-	require.True(t, installed.IsExecutable())
+	installed := installedAddon.(runningAddon)
 
-	// Configuration is delivered as a remote config entry whose role marks it as
-	// addon config, so it never reaches the Collector's YAML.
+	// Configuration is delivered as a remote config entry keyed by the same
+	// package name, whose role marks it as addon config so it never reaches
+	// the Collector's YAML.
 	scraperConfig := fmt.Sprintf(`otel.jmx.service.url=service:jmx:rmi:///jndi/rmi://localhost:%d/jmxrmi
 otel.jmx.target.system=jvm
 otel.metrics.exporter=otlp
@@ -100,15 +91,12 @@ otel.exporter.otlp.endpoint=%s
 otel.metric.export.interval=2000
 `, jmxPort, otlp.URL)
 
-	require.NoError(t, s.applyAddonConfigs(ctx, addonRemoteConfig(map[string]string{
-		"jmx-scraper": scraperConfig,
-	})))
-
-	require.NoError(t, s.addons.StartAll(ctx))
+	setAddonConfigs(s, map[string]string{name: scraperConfig})
+	assert.False(t, s.reconcileAddons(ctx))
 	require.True(t, installed.IsRunning())
 	t.Logf("scraper addon running with pid %d", installed.Pid())
 
-	logPath := filepath.Join(installed.Dir(), "addon.log")
+	logPath := filepath.Join(dir, "addon.log")
 
 	// The scraper read the configuration the Supervisor delivered.
 	requireEventuallyFileContains(t, logPath, "JMX scraping started")
@@ -124,9 +112,9 @@ otel.metric.export.interval=2000
 	// Stopping the addon leaves the package installed. This is the mechanism a
 	// remotely requested disabled state would drive, and the reason disable
 	// cannot be expressed as removal from packages_available.
-	require.NoError(t, installed.Stop(ctx))
+	require.NoError(t, installedAddon.Shutdown(ctx))
 	assert.False(t, installed.IsRunning())
-	assert.FileExists(t, filepath.Join(installed.Dir(), "opentelemetry-jmx-scraper.jar"),
+	assert.FileExists(t, filepath.Join(dir, "opentelemetry-jmx-scraper.jar"),
 		"stopping an addon must not remove its files")
 
 	exported := metricRequests.Load()
@@ -134,13 +122,12 @@ otel.metric.export.interval=2000
 	assert.Equal(t, exported, metricRequests.Load(), "a stopped addon must not keep exporting")
 
 	// Starting it again resumes without re-downloading anything.
-	require.NoError(t, installed.Start(ctx))
+	_, err = installedAddon.Start(ctx)
+	require.NoError(t, err)
 	assert.True(t, installed.IsRunning())
 	require.Eventually(t, func() bool {
 		return metricRequests.Load() > exported
 	}, 90*time.Second, 250*time.Millisecond, "expected exports to resume after restart")
-
-	require.NoError(t, installed.Stop(ctx))
 }
 
 // startJMXTargetJVM starts a JVM with the JMX remote agent enabled on port and
