@@ -11,14 +11,12 @@ compiled into its binary. Two current, unserved needs:
 
 **Helper processes.** The JMX Metric Scraper
 (`io.opentelemetry.contrib:opentelemetry-jmx-scraper`) runs beside a Collector
-and exports OTLP to it. `receiver/jmxreceiver` was removed in **v0.157.0** (code
-removal PR #49478, merged 2026-07-10), and with it the only managed deployment
-path. Issue #34825 settled that JMX functionality moves to "a direct
-installation of the jmx scraper as a standalone replacement". Nobody specified
+and exports OTLP to it. `receiver/jmxreceiver` was removed in **v0.157.0**, and with it the only managed deployment
+path. JMX functionality moves to "a direct installation of the jmx scraper as a standalone replacement" without specifying
 how direct installation happens across a fleet.
 
 **Data files.** `processor/geoipprocessor` requires a MaxMind `.mmdb` through
-`database_path` (`internal/provider/maxmindprovider/config.go`), which is
+`database_path`, which is
 required and errors if empty. MaxMind publishes updates weekly. Procurement and
 refresh are entirely manual.
 
@@ -60,9 +58,6 @@ sup, err := supervisor.NewSupervisor(ctx, logger, cfg,
 service path.
 
 ### Why types, not a package manifest
-
-An earlier version of this PoC had each package carry a manifest declaring its
-type and entrypoint. Typed addons are better on two counts.
 
 **The server cannot make the Supervisor run arbitrary commands.** With a
 manifest, a package declares what to execute, so whoever controls the OpAMP
