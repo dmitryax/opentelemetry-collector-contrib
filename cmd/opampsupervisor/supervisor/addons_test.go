@@ -51,6 +51,8 @@ func newAddonTestSupervisorWithConfig(t *testing.T, cfg config.Supervisor, extra
 		persistentState:   &persistentState{InstanceID: uuid.New()},
 		hasNewConfig:      make(chan struct{}, 1),
 	}
+	s.runCtx, s.runCtxCancel = context.WithCancel(context.Background())
+	t.Cleanup(s.runCtxCancel)
 
 	var err error
 	s.addons, err = addon.NewManager(zap.NewNop(), append(builtinAddonFactories(), extra...)...)
@@ -624,3 +626,34 @@ func TestNewSupervisorRegistersAddonTypes(t *testing.T) {
 type fileaddonDuplicate struct{ splunkTAFactory }
 
 func (fileaddonDuplicate) Type() addon.Type { return "file" }
+
+// TestHeldBackRestartSurvivesCancelledMessageContext covers a dropped
+// connection during a package sync. Over WebSocket the context passed with a
+// message is the connection's, and it is cancelled on disconnect. The
+// reconciliation and the held-back Collector restart must still happen once the
+// sync completes.
+func TestHeldBackRestartSurvivesCancelledMessageContext(t *testing.T) {
+	s := newAddonTestSupervisor(t, splunkTAFactory{})
+	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+
+	syncer := newGatedSyncer(func() {
+		require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
+			tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
+			"https://example.invalid/unix.tar.gz", "9.0.0"))
+	})
+
+	msgCtx, cancel := context.WithCancel(context.Background())
+	s.syncPackages(msgCtx, syncer, true)
+
+	// The connection drops before the sync finishes.
+	cancel()
+	close(syncer.gate)
+
+	require.Eventually(t, func() bool { return restartSignals(s) == 1 }, 10*time.Second, 10*time.Millisecond,
+		"the held-back Collector restart must not be lost when the message context ends")
+	_, dir, ok := s.addons.Get("splunk_ta:unix")
+	require.True(t, ok)
+	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(conf), "state = disabled", "the addon must still be reconciled")
+}

@@ -69,15 +69,16 @@ func (s *Supervisor) syncPackages(ctx context.Context, syncer types.PackagesSync
 	}
 
 	go func() {
-		select {
-		case <-syncer.Done():
-		case <-ctx.Done():
-			return
-		}
+		// Wait for Done only. The syncer closes it on every path, including a
+		// failed or cancelled sync. ctx must not end the wait: over WebSocket it
+		// is the connection's context, so a dropped connection would otherwise
+		// skip the reconciliation and lose the held-back Collector restart.
+		<-syncer.Done()
 
 		// The remote config may have arrived with this message or before the
 		// packages it configures were installed. Reconciling now applies it.
-		if s.reconcileAddons(ctx) || restartPending {
+		// It uses the Supervisor's context for the same reason as above.
+		if s.reconcileAddons(s.runCtx) || restartPending {
 			s.signalAgentRestart()
 		}
 	}()
