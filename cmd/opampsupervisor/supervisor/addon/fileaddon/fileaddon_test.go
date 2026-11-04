@@ -7,7 +7,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +21,7 @@ import (
 func install(t *testing.T, content []byte, downloadURL string) (string, error) {
 	t.Helper()
 	dir := t.TempDir()
-	err := NewFactory().Install(context.Background(), addon.InstallSettings{
+	err := NewFactory().Install(t.Context(), addon.InstallSettings{
 		ID:          addon.ID{Type: Type, Name: "geoip"},
 		Dir:         dir,
 		Content:     content,
@@ -73,9 +72,9 @@ func TestInstallRejectsURLWithoutFileName(t *testing.T) {
 }
 
 func TestFileAddonRunsNothingAndRejectsConfig(t *testing.T) {
-	a, err := NewFactory().Create(context.Background(), addon.Settings{ID: addon.ID{Type: Type, Name: "geoip"}, Dir: t.TempDir(), Logger: zap.NewNop()})
+	a, err := NewFactory().Create(t.Context(), addon.Settings{ID: addon.ID{Type: Type, Name: "geoip"}, Dir: t.TempDir(), Logger: zap.NewNop()})
 	require.NoError(t, err)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	effect, err := a.Configure(ctx, nil)
 	require.NoError(t, err)

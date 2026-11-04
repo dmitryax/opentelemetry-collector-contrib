@@ -98,8 +98,7 @@ func (p *Process) Start() error {
 	go func() {
 		defer logFile.Close()
 		if err := cmd.Wait(); err != nil {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
+			if _, ok := errors.AsType[*exec.ExitError](err); !ok {
 				p.logger.Error("Error waiting for addon process", zap.Error(err))
 			}
 		}

@@ -4,7 +4,6 @@
 package jmxaddon
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,7 +40,7 @@ for last; do :; done
 cp "$last" "` + observedDir + `/config"
 while true; do sleep 0.05; done
 `
-	require.NoError(t, os.WriteFile(filepath.Join(home, "bin", "java"), []byte(script), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "bin", "java"), []byte(script), 0o700)) //nolint:gosec // G306: the stand-in JVM must be executable
 	t.Setenv("JAVA_HOME", home)
 	return observedDir
 }
@@ -58,14 +57,14 @@ func newInstalled(t *testing.T) (addon.Addon, string) {
 	dir := t.TempDir()
 	f := NewFactory()
 	id := addon.ID{Type: Type, Name: "tomcat"}
-	require.NoError(t, f.Install(context.Background(), addon.InstallSettings{
+	require.NoError(t, f.Install(t.Context(), addon.InstallSettings{
 		ID: id, Dir: dir, Content: fakeJar,
 		DownloadURL: "https://example.invalid/opentelemetry-jmx-scraper.jar",
 		Logger:      zap.NewNop(),
 	}))
-	a, err := f.Create(context.Background(), addon.Settings{ID: id, Dir: dir, Logger: zap.NewNop()})
+	a, err := f.Create(t.Context(), addon.Settings{ID: id, Dir: dir, Logger: zap.NewNop()})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = a.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = a.Shutdown(t.Context()) })
 	return a, dir
 }
 
@@ -91,7 +90,7 @@ func eventuallyFileContains(t *testing.T, path, want string) {
 func TestInstallWithoutJavaFails(t *testing.T) {
 	withoutJava(t)
 
-	err := NewFactory().Install(context.Background(), addon.InstallSettings{
+	err := NewFactory().Install(t.Context(), addon.InstallSettings{
 		ID: addon.ID{Type: Type, Name: "tomcat"}, Dir: t.TempDir(), Content: fakeJar, Logger: zap.NewNop(),
 	})
 	require.ErrorIs(t, err, addon.ErrRuntimeNotFound)
@@ -101,7 +100,7 @@ func TestInstallWithoutJavaFails(t *testing.T) {
 func TestInstallRejectsNonJar(t *testing.T) {
 	installFakeJava(t)
 
-	err := NewFactory().Install(context.Background(), addon.InstallSettings{
+	err := NewFactory().Install(t.Context(), addon.InstallSettings{
 		ID: addon.ID{Type: Type, Name: "tomcat"}, Dir: t.TempDir(), Content: []byte("#!/bin/sh\nrm -rf /\n"), Logger: zap.NewNop(),
 	})
 	require.ErrorContains(t, err, "must be the opentelemetry-jmx-scraper jar")
@@ -114,7 +113,7 @@ func TestJMXAddonLifecycle(t *testing.T) {
 	observed := installFakeJava(t)
 	a, dir := newInstalled(t)
 	proc := a.(running)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Installed but not configured: nothing runs.
 	_, err := a.Configure(ctx, nil)
@@ -168,7 +167,7 @@ func TestJMXAddonLifecycle(t *testing.T) {
 func TestStartAfterJavaRemoved(t *testing.T) {
 	installFakeJava(t)
 	a, _ := newInstalled(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, err := a.Configure(ctx, []byte("otel.jmx.target.system=tomcat\n"))
 	require.NoError(t, err)

@@ -20,7 +20,7 @@ type options struct {
 // A distribution uses it to support addon types specific to it:
 //
 //	sup, err := supervisor.NewSupervisor(ctx, logger, cfg,
-//		supervisor.WithAddonFactories(splunkta.NewFactory()))
+//		supervisor.WithAddonFactories(customrules.NewFactory()))
 //
 // Registering a type that is already supported is an error.
 func WithAddonFactories(factories ...addon.Factory) Option {

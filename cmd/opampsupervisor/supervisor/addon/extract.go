@@ -109,7 +109,7 @@ func resolveWithin(dir, name string) (string, error) {
 }
 
 // writeFile writes the current tar entry to target, creating parent directories
-// as needed. Only the owner-executable bit is honoured from the archive so that
+// as needed. Only the owner-executable bit is honored from the archive so that
 // an entrypoint stays runnable without the package being able to widen access.
 func writeFile(r io.Reader, target string, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

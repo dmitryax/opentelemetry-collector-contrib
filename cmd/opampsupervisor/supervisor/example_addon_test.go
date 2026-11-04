@@ -14,17 +14,17 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/cmd/opampsupervisor/supervisor/config"
 )
 
-// taFactory stands in for an addon type a distribution implements, such as
-// splunk_ta. See splunkTAFactory in addons_test.go for one that does work.
-type taFactory struct{}
+// rulesFactory stands in for an addon type a distribution implements. See
+// customRulesFactory in addons_test.go for one that does work.
+type rulesFactory struct{}
 
-func (taFactory) Type() addon.Type { return "splunk_ta" }
+func (rulesFactory) Type() addon.Type { return "custom_rules" }
 
-func (taFactory) Install(_ context.Context, set addon.InstallSettings) error {
+func (rulesFactory) Install(_ context.Context, set addon.InstallSettings) error {
 	return addon.ExtractTarGz(set.Content, set.Dir)
 }
 
-func (taFactory) Create(context.Context, addon.Settings) (addon.Addon, error) {
+func (rulesFactory) Create(context.Context, addon.Settings) (addon.Addon, error) {
 	return nil, nil
 }
 
@@ -38,7 +38,7 @@ func ExampleWithAddonFactories() {
 	}
 
 	sup, err := supervisor.NewSupervisor(context.Background(), zap.NewNop(), cfg,
-		supervisor.WithAddonFactories(taFactory{}))
+		supervisor.WithAddonFactories(rulesFactory{}))
 	if err != nil {
 		log.Fatal(err)
 	}

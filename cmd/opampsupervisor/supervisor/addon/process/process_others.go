@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// sysProcAttr puts the child in its own process group so that signalling it
+// sysProcAttr puts the child in its own process group so that signaling it
 // also reaches the processes it starts.
 func sysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}

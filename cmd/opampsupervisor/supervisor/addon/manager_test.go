@@ -86,8 +86,8 @@ func TestManagerSupports(t *testing.T) {
 	require.NoError(t, m.Supports("file:geoip"))
 	require.NoError(t, m.Supports("jmx:tomcat"))
 
-	err = m.Supports("splunk_ta:unix")
-	require.ErrorContains(t, err, `unsupported addon type "splunk_ta"`)
+	err = m.Supports("custom_rules:base")
+	require.ErrorContains(t, err, `unsupported addon type "custom_rules"`)
 	require.ErrorContains(t, err, "[file jmx]", "the error should list the supported types")
 
 	require.ErrorContains(t, m.Supports("no-type"), `must have the form "<type>:<name>"`)
@@ -104,7 +104,7 @@ func TestManagerReconcile(t *testing.T) {
 	m, err := NewManager(zap.NewNop(), plain, restarting)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	require.NoError(t, m.Load(ctx, "file:a", t.TempDir()))
 	require.NoError(t, m.Load(ctx, "restarting:b", t.TempDir()))
 	assert.Equal(t, []string{"file:a", "restarting:b"}, m.Names())
@@ -150,7 +150,7 @@ func TestManagerReconcileIsolatesFailures(t *testing.T) {
 	m, err := NewManager(zap.NewNop(), f)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	require.NoError(t, m.Load(ctx, "file:broken", t.TempDir()))
 	require.NoError(t, m.Load(ctx, "file:healthy", t.TempDir()))
 	f.addons["file:broken"].configureErr = errors.New("boom")
@@ -172,7 +172,7 @@ func TestManagerLoadReplacesAndUnloadShutsDown(t *testing.T) {
 	m, err := NewManager(zap.NewNop(), f)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	require.NoError(t, m.Load(ctx, "file:a", t.TempDir()))
 	first := f.addons["file:a"]
 	_, err = m.Reconcile(ctx, nil)
@@ -203,9 +203,9 @@ func TestManagerInstallDispatchesByType(t *testing.T) {
 	m, err := NewManager(zap.NewNop(), f)
 	require.NoError(t, err)
 
-	err = m.Install(context.Background(), "file:a", t.TempDir(), nil, "https://example.invalid/a", nil)
+	err = m.Install(t.Context(), "file:a", t.TempDir(), nil, "https://example.invalid/a", nil)
 	require.ErrorContains(t, err, "install failed")
 
-	err = m.Install(context.Background(), "jmx:a", t.TempDir(), nil, "https://example.invalid/a", nil)
+	err = m.Install(t.Context(), "jmx:a", t.TempDir(), nil, "https://example.invalid/a", nil)
 	require.ErrorContains(t, err, `unsupported addon type "jmx"`)
 }

@@ -4,7 +4,6 @@
 package supervisor
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/open-telemetry/opamp-go/protobufs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,12 +65,12 @@ func TestJMXScraperAddonEndToEnd(t *testing.T) {
 	defer target()
 
 	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// The package is the upstream release asset exactly as published: the jmx
 	// type knows how to run it, so there is no wrapper and no manifest.
 	const name = "jmx:tomcat"
-	require.NoError(t, installPackage(s.packages, name, protobufs.PackageType_PackageType_Addon, jar,
+	require.NoError(t, installPackage(s.packages, name, jar,
 		"https://github.com/open-telemetry/opentelemetry-java-contrib/releases/download/v1.61.0/opentelemetry-jmx-scraper.jar",
 		"1.61.0"))
 
@@ -149,7 +147,7 @@ public class Target {
 	logFile, err := os.Create(filepath.Join(dir, "target.log"))
 	require.NoError(t, err)
 
-	cmd := exec.Command("java",
+	cmd := exec.Command("java", //nolint:gosec // G204: fixed JVM flags; the only variable is a local port
 		"-Dcom.sun.management.jmxremote",
 		"-Dcom.sun.management.jmxremote.port="+strconv.Itoa(port),
 		"-Dcom.sun.management.jmxremote.rmi.port="+strconv.Itoa(port),

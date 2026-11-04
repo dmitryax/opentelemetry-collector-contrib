@@ -135,8 +135,8 @@ func (m *Manager) Load(ctx context.Context, packageName, dir string) error {
 
 	if previous, ok := m.instances[packageName]; ok {
 		delete(m.instances, packageName)
-		if err := previous.addon.Shutdown(ctx); err != nil {
-			m.logger.Warn("Could not shut down previous addon", zap.String("addon", packageName), zap.Error(err))
+		if shutdownErr := previous.addon.Shutdown(ctx); shutdownErr != nil {
+			m.logger.Warn("Could not shut down previous addon", zap.String("addon", packageName), zap.Error(shutdownErr))
 		}
 	}
 

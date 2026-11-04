@@ -51,7 +51,7 @@ func newAddonTestSupervisorWithConfig(t *testing.T, cfg config.Supervisor, extra
 		persistentState:   &persistentState{InstanceID: uuid.New()},
 		hasNewConfig:      make(chan struct{}, 1),
 	}
-	s.runCtx, s.runCtxCancel = context.WithCancel(context.Background())
+	s.runCtx, s.runCtxCancel = context.WithCancel(t.Context())
 	t.Cleanup(s.runCtxCancel)
 
 	var err error
@@ -60,21 +60,24 @@ func newAddonTestSupervisorWithConfig(t *testing.T, cfg config.Supervisor, extra
 	s.packages, err = newPackageManager(zap.NewNop(), filepath.Join(cfg.Storage.Directory, packagesDirName), s.addons)
 	require.NoError(t, err)
 
-	t.Cleanup(func() { s.stopAddons(context.Background()) })
+	t.Cleanup(func() { s.stopAddons(t.Context()) })
 	return s
 }
 
 // installPackage drives the packageManager through the call sequence the
-// opamp-go PackagesSyncer uses, so the PoC is exercised the way the real client
-// drives it. It returns the error the syncer would report as INSTALL_FAILED.
-func installPackage(p *packageManager, name string, typ protobufs.PackageType, content []byte, downloadURL, version string) error {
+// opamp-go PackagesSyncer uses for an addon package, so addons are exercised the
+// way the real client drives them. It returns the error the syncer would report
+// as INSTALL_FAILED.
+func installPackage(p *packageManager, name string, content []byte, downloadURL, version string) error {
+	const typ = protobufs.PackageType_PackageType_Addon
+
 	state, err := p.PackageState(name)
 	if err != nil {
 		return err
 	}
 	if !state.Exists {
-		if err := p.CreatePackage(name, typ); err != nil {
-			return err
+		if createErr := p.CreatePackage(name, typ); createErr != nil {
+			return createErr
 		}
 	}
 
@@ -84,8 +87,8 @@ func installPackage(p *packageManager, name string, typ protobufs.PackageType, c
 		return err
 	}
 	if !bytes.Equal(existing, sum[:]) {
-		if err := p.UpdateContent(context.Background(), name, downloadURL, bytes.NewReader(content), sum[:], nil); err != nil {
-			return err
+		if updateErr := p.UpdateContent(context.Background(), name, downloadURL, bytes.NewReader(content), sum[:], nil); updateErr != nil {
+			return updateErr
 		}
 	}
 
@@ -167,7 +170,7 @@ for last; do :; done
 cp "$last" "` + observed + `/config"
 while true; do sleep 0.05; done
 `
-	require.NoError(t, os.WriteFile(filepath.Join(home, "bin", "java"), []byte(script), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "bin", "java"), []byte(script), 0o700)) //nolint:gosec // G306: the stand-in JVM must be executable
 	t.Setenv("JAVA_HOME", home)
 	return filepath.Join(observed, "config")
 }
@@ -178,10 +181,9 @@ while true; do sleep 0.05; done
 func TestJMXAddonThroughSupervisor(t *testing.T) {
 	observed := installFakeJava(t)
 	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
-	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("1.61.0"), "https://github.com/open-telemetry/opentelemetry-java-contrib/releases/download/v1.61.0/opentelemetry-jmx-scraper.jar", "1.61.0"))
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", fakeJar("1.61.0"), "https://github.com/open-telemetry/opentelemetry-java-contrib/releases/download/v1.61.0/opentelemetry-jmx-scraper.jar", "1.61.0"))
 
 	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
 	assert.False(t, s.reconcileAddons(ctx), "a scraper never needs a Collector restart")
@@ -218,8 +220,7 @@ func TestJMXAddonWithoutJavaReportsInstallFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	s := newAddonTestSupervisor(t)
 
-	err := installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1")
+	err := installPackage(s.packages, "jmx:tomcat", fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1")
 	require.ErrorIs(t, err, addon.ErrRuntimeNotFound)
 	assert.Empty(t, s.addons.Names())
 	assert.NoDirExists(t, s.packages.AddonDir("jmx:tomcat"))
@@ -228,17 +229,15 @@ func TestJMXAddonWithoutJavaReportsInstallFailure(t *testing.T) {
 func TestJMXAddonUpgradeReplacesProcess(t *testing.T) {
 	installFakeJava(t)
 	s := newAddonTestSupervisor(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
 
-	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1.0.0"))
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1.0.0"))
 	s.reconcileAddons(ctx)
 	first, _, _ := s.addons.Get("jmx:tomcat")
 	require.True(t, first.(runningAddon).IsRunning())
 
-	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("2"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "2.0.0"))
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", fakeJar("2"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "2.0.0"))
 	assert.False(t, first.(runningAddon).IsRunning(), "the previous scraper must be stopped before its files are replaced")
 
 	s.reconcileAddons(ctx)
@@ -256,17 +255,16 @@ func TestJMXAddonUpgradeReplacesProcess(t *testing.T) {
 func TestFileAddonThroughSupervisor(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 
-	require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
-		[]byte("pretend-database"), "https://example.invalid/GeoLite2-City.mmdb", "2026.10.28"))
+	require.NoError(t, installPackage(s.packages, "file:geoip", []byte("pretend-database"), "https://example.invalid/GeoLite2-City.mmdb", "2026.10.28"))
 
-	assert.False(t, s.reconcileAddons(context.Background()))
+	assert.False(t, s.reconcileAddons(t.Context()))
 	_, dir, ok := s.addons.Get("file:geoip")
 	require.True(t, ok)
 	// This path is what a geoipprocessor database_path points at.
 	assert.FileExists(t, filepath.Join(dir, "GeoLite2-City.mmdb"))
 }
 
-// --- framework behaviour ---
+// --- framework behavior ---
 
 // TestUnsupportedAddonTypeRejectedBeforeDownload checks that the Supervisor
 // refuses an addon type it was not built with, before fetching anything. The
@@ -274,8 +272,8 @@ func TestFileAddonThroughSupervisor(t *testing.T) {
 func TestUnsupportedAddonTypeRejectedBeforeDownload(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 
-	err := s.packages.CreatePackage("splunk_ta:unix", protobufs.PackageType_PackageType_Addon)
-	require.ErrorContains(t, err, `unsupported addon type "splunk_ta"`)
+	err := s.packages.CreatePackage("custom_rules:base", protobufs.PackageType_PackageType_Addon)
+	require.ErrorContains(t, err, `unsupported addon type "custom_rules"`)
 
 	err = s.packages.CreatePackage("no-type", protobufs.PackageType_PackageType_Addon)
 	require.ErrorContains(t, err, `must have the form "<type>:<name>"`)
@@ -292,7 +290,7 @@ func TestAddonContentHashMismatchRejected(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 	require.NoError(t, s.packages.CreatePackage("file:bad", protobufs.PackageType_PackageType_Addon))
 
-	err := s.packages.UpdateContent(context.Background(), "file:bad", "https://example.invalid/bad.mmdb",
+	err := s.packages.UpdateContent(t.Context(), "file:bad", "https://example.invalid/bad.mmdb",
 		bytes.NewReader([]byte("x")), []byte("not-the-right-hash"), nil)
 	require.ErrorContains(t, err, "content hash mismatch")
 	assert.Empty(t, s.addons.Names())
@@ -301,12 +299,10 @@ func TestAddonContentHashMismatchRejected(t *testing.T) {
 
 func TestFailedInstallLeavesPreviousVersion(t *testing.T) {
 	s := newAddonTestSupervisor(t)
-	require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
-		tarGz(t, map[string]string{"db.mmdb": "original"}), "https://example.invalid/geoip.tar.gz", "1"))
+	require.NoError(t, installPackage(s.packages, "file:geoip", tarGz(t, map[string]string{"db.mmdb": "original"}), "https://example.invalid/geoip.tar.gz", "1"))
 
 	// Not a gzip stream, though the URL says it is.
-	err := installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
-		[]byte("corrupt"), "https://example.invalid/geoip.tar.gz", "2")
+	err := installPackage(s.packages, "file:geoip", []byte("corrupt"), "https://example.invalid/geoip.tar.gz", "2")
 	require.ErrorContains(t, err, "gzip")
 
 	body, readErr := os.ReadFile(filepath.Join(s.packages.AddonDir("file:geoip"), "db.mmdb"))
@@ -322,14 +318,13 @@ func TestFailedInstallLeavesPreviousVersion(t *testing.T) {
 func TestAddonsSurviveRestart(t *testing.T) {
 	installFakeJava(t)
 	s := newAddonTestSupervisor(t)
-	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
 	require.NoError(t, s.packages.SetAllPackagesHash([]byte("all-hash")))
-	s.stopAddons(context.Background())
+	s.stopAddons(t.Context())
 
 	restarted := newAddonTestSupervisorWithConfig(t, s.config)
 	setAddonConfigs(restarted, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
-	restarted.startAddons(context.Background())
+	restarted.startAddons(t.Context())
 
 	a, _, ok := restarted.addons.Get("jmx:tomcat")
 	require.True(t, ok)
@@ -344,14 +339,13 @@ func TestAddonsSurviveRestart(t *testing.T) {
 func TestShutdownStopsAddons(t *testing.T) {
 	installFakeJava(t)
 	s := newAddonTestSupervisor(t)
-	require.NoError(t, installPackage(s.packages, "jmx:tomcat", protobufs.PackageType_PackageType_Addon,
-		fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
+	require.NoError(t, installPackage(s.packages, "jmx:tomcat", fakeJar("1"), "https://example.invalid/opentelemetry-jmx-scraper.jar", "1"))
 	setAddonConfigs(s, map[string]string{"jmx:tomcat": "otel.jmx.target.system=tomcat\n"})
-	s.reconcileAddons(context.Background())
+	s.reconcileAddons(t.Context())
 
 	a, _, _ := s.addons.Get("jmx:tomcat")
 	require.True(t, a.(runningAddon).IsRunning())
-	s.stopAddons(context.Background())
+	s.stopAddons(t.Context())
 	assert.False(t, a.(runningAddon).IsRunning(), "the Supervisor must not leave orphaned addon processes")
 }
 
@@ -401,64 +395,59 @@ func TestAddonConfigIsNotMergedIntoCollectorConfig(t *testing.T) {
 
 // --- distribution-defined type ---
 
-// splunkTAFactory is the shape of an addon type a distribution registers with
-// WithAddonFactories. A Splunk TA is read by the Collector itself rather than
-// run as a process, so applying a change requires restarting the Collector,
-// which is what Effect.RestartAgent is for. The real implementation belongs in
-// the distribution; this one only models the parts the framework touches.
-type splunkTAFactory struct{}
+// customRulesFactory is the shape of an addon type a distribution registers
+// with WithAddonFactories: a rule set the Collector itself loads at startup,
+// rather than a process. Applying a change to it requires restarting the
+// Collector, which is what Effect.RestartAgent is for.
+type customRulesFactory struct{}
 
-func (splunkTAFactory) Type() addon.Type { return "splunk_ta" }
+func (customRulesFactory) Type() addon.Type { return "custom_rules" }
 
-func (splunkTAFactory) Install(_ context.Context, set addon.InstallSettings) error {
+func (customRulesFactory) Install(_ context.Context, set addon.InstallSettings) error {
 	return addon.ExtractTarGz(set.Content, set.Dir)
 }
 
-func (splunkTAFactory) Create(_ context.Context, set addon.Settings) (addon.Addon, error) {
-	return &splunkTA{dir: set.Dir}, nil
+func (customRulesFactory) Create(_ context.Context, set addon.Settings) (addon.Addon, error) {
+	return &customRules{dir: set.Dir}, nil
 }
 
-type splunkTA struct {
+type customRules struct {
 	dir        string
 	registered bool
 	state      string
 }
 
-// Configure takes the TA's state ("enabled" or "disabled") from its config
-// entry and writes it where the Collector reads it.
-func (ta *splunkTA) Configure(_ context.Context, body []byte) (addon.Effect, error) {
+// Configure takes the rule set's state ("enabled" or "disabled") from its
+// config entry and writes it where the Collector reads it.
+func (r *customRules) Configure(_ context.Context, body []byte) (addon.Effect, error) {
 	state := "enabled"
 	if body != nil {
 		state = strings.TrimSpace(string(body))
 	}
 	if state != "enabled" && state != "disabled" {
-		return addon.Effect{}, fmt.Errorf("unknown TA state %q", state)
+		return addon.Effect{}, fmt.Errorf("unknown rule set state %q", state)
 	}
-	if state == ta.state {
+	if state == r.state {
 		return addon.Effect{}, nil
 	}
-	ta.state = state
-	if err := os.MkdirAll(filepath.Join(ta.dir, "local"), 0o700); err != nil {
+	r.state = state
+	if err := os.WriteFile(filepath.Join(r.dir, "state"), []byte("state = "+state+"\n"), 0o600); err != nil {
 		return addon.Effect{}, err
 	}
-	conf := "[install]\nstate = " + state + "\n"
-	if err := os.WriteFile(filepath.Join(ta.dir, "local", "app.conf"), []byte(conf), 0o600); err != nil {
-		return addon.Effect{}, err
-	}
-	// A state change on a TA the Collector already loaded takes a restart.
-	return addon.Effect{RestartAgent: ta.registered}, nil
+	// A state change on a rule set the Collector already loaded takes a restart.
+	return addon.Effect{RestartAgent: r.registered}, nil
 }
 
-// Start registers the TA with the Collector the first time.
-func (ta *splunkTA) Start(context.Context) (addon.Effect, error) {
-	if ta.registered {
+// Start registers the rule set with the Collector the first time.
+func (r *customRules) Start(context.Context) (addon.Effect, error) {
+	if r.registered {
 		return addon.Effect{}, nil
 	}
-	ta.registered = true
+	r.registered = true
 	return addon.Effect{RestartAgent: true}, nil
 }
 
-func (*splunkTA) Shutdown(context.Context) error { return nil }
+func (*customRules) Shutdown(context.Context) error { return nil }
 
 // gatedSyncer stands in for the opamp-go PackagesSyncer: its sync runs only
 // once the test releases the gate, so the test can observe the Supervisor
@@ -485,28 +474,27 @@ func (g *gatedSyncer) Sync(context.Context) error {
 func (g *gatedSyncer) Done() <-chan struct{} { return g.done }
 
 func TestDistributionRegistersAddonType(t *testing.T) {
-	s := newAddonTestSupervisor(t, splunkTAFactory{})
-	assert.Equal(t, []addon.Type{"file", "jmx", "splunk_ta"}, s.addons.Types())
+	s := newAddonTestSupervisor(t, customRulesFactory{})
+	assert.Equal(t, []addon.Type{"custom_rules", "file", "jmx"}, s.addons.Types())
 
-	_, err := addon.NewManager(zap.NewNop(), append(builtinAddonFactories(), splunkTAFactory{}, splunkTAFactory{})...)
+	_, err := addon.NewManager(zap.NewNop(), append(builtinAddonFactories(), customRulesFactory{}, customRulesFactory{})...)
 	require.ErrorContains(t, err, "registered more than once")
 }
 
 // TestOneCollectorRestartPerMessage covers the ordering concern: a message that
-// changes the Collector config and installs a TA the Collector reads must
-// cause exactly one Collector restart, after the TA is in place, rather than
-// one restart with the old TAs and another with the new.
+// changes the Collector config and installs a rule set the Collector reads
+// must cause exactly one Collector restart, after the rule set is in place, rather than
+// one restart with the old addons and another with the new.
 func TestOneCollectorRestartPerMessage(t *testing.T) {
-	s := newAddonTestSupervisor(t, splunkTAFactory{})
-	ctx := context.Background()
+	s := newAddonTestSupervisor(t, customRulesFactory{})
+	ctx := t.Context()
 
-	// The same message carries the TA's state in the remote config.
-	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+	// The same message carries the rule set's state in the remote config.
+	setAddonConfigs(s, map[string]string{"custom_rules:base": "disabled"})
 
 	syncer := newGatedSyncer(func() {
-		require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
-			tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
-			"https://example.invalid/unix.tar.gz", "9.0.0"))
+		require.NoError(t, installPackage(s.packages, "custom_rules:base", tarGz(t, map[string]string{"rules.yaml": "rules: []\n"}),
+			"https://example.invalid/rules.tar.gz", "9.0.0"))
 	})
 
 	// restartPending: the Collector config changed in this message too.
@@ -514,40 +502,39 @@ func TestOneCollectorRestartPerMessage(t *testing.T) {
 
 	// While the package is still syncing, the Collector must not restart.
 	time.Sleep(100 * time.Millisecond)
-	assert.Zero(t, restartSignals(s), "the Collector must not restart before the TA is in place")
+	assert.Zero(t, restartSignals(s), "the Collector must not restart before the rule set is in place")
 
 	close(syncer.gate)
 	require.Eventually(t, func() bool { return restartSignals(s) == 1 }, 10*time.Second, 10*time.Millisecond)
 
-	// When the restart is signalled, the TA and its state are already on disk.
-	_, dir, ok := s.addons.Get("splunk_ta:unix")
+	// When the restart is signaled, the rule set and its state are already on disk.
+	_, dir, ok := s.addons.Get("custom_rules:base")
 	require.True(t, ok)
-	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	conf, err := os.ReadFile(filepath.Join(dir, "state"))
 	require.NoError(t, err)
 	assert.Contains(t, string(conf), "state = disabled")
 }
 
 // TestAddonStateChangeRestartsCollectorOnce covers a state-only change to an
-// installed TA: no download, one restart.
+// installed rule set: no download, one restart.
 func TestAddonStateChangeRestartsCollectorOnce(t *testing.T) {
-	s := newAddonTestSupervisor(t, splunkTAFactory{})
-	ctx := context.Background()
+	s := newAddonTestSupervisor(t, customRulesFactory{})
+	ctx := t.Context()
 
-	require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
-		tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
-		"https://example.invalid/unix.tar.gz", "9.0.0"))
-	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "enabled"})
-	require.True(t, s.reconcileAddons(ctx), "registering a new TA needs a Collector restart")
+	require.NoError(t, installPackage(s.packages, "custom_rules:base", tarGz(t, map[string]string{"rules.yaml": "rules: []\n"}),
+		"https://example.invalid/rules.tar.gz", "9.0.0"))
+	setAddonConfigs(s, map[string]string{"custom_rules:base": "enabled"})
+	require.True(t, s.reconcileAddons(ctx), "registering a new rule set needs a Collector restart")
 
 	// Same state again: nothing to do.
 	assert.False(t, s.reconcileAddons(ctx))
 
-	// Disable: the Collector must restart to stop reading the TA.
-	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+	// Disable: the Collector must restart to stop reading the rule set.
+	setAddonConfigs(s, map[string]string{"custom_rules:base": "disabled"})
 	assert.True(t, s.reconcileAddons(ctx))
 
-	_, dir, _ := s.addons.Get("splunk_ta:unix")
-	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	_, dir, _ := s.addons.Get("custom_rules:base")
+	conf, err := os.ReadFile(filepath.Join(dir, "state"))
 	require.NoError(t, err)
 	assert.Contains(t, string(conf), "state = disabled")
 }
@@ -557,12 +544,11 @@ func TestAddonStateChangeRestartsCollectorOnce(t *testing.T) {
 func TestNoRestartWhenNothingChanged(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 	syncer := newGatedSyncer(func() {
-		require.NoError(t, installPackage(s.packages, "file:geoip", protobufs.PackageType_PackageType_Addon,
-			[]byte("db"), "https://example.invalid/GeoLite2-City.mmdb", "1"))
+		require.NoError(t, installPackage(s.packages, "file:geoip", []byte("db"), "https://example.invalid/GeoLite2-City.mmdb", "1"))
 	})
 	close(syncer.gate)
 
-	s.syncPackages(context.Background(), syncer, false)
+	s.syncPackages(t.Context(), syncer, false)
 	<-syncer.Done()
 	time.Sleep(100 * time.Millisecond)
 	assert.Zero(t, restartSignals(s))
@@ -576,7 +562,7 @@ func TestPackageDirIsSafeFileName(t *testing.T) {
 	s := newAddonTestSupervisor(t)
 	seen := map[string]string{}
 
-	for _, name := range []string{"jmx:tomcat", "splunk_ta:a/b", `file:x*y?<>|"`, "file:..", "file:a b", "file:a+b"} {
+	for _, name := range []string{"jmx:tomcat", "custom_rules:a/b", `file:x*y?<>|"`, "file:..", "file:a b", "file:a+b"} {
 		base := filepath.Base(s.packages.AddonDir(name))
 		require.Equal(t, packageFilesDir, base)
 		dirName := filepath.Base(filepath.Dir(s.packages.AddonDir(name)))
@@ -599,7 +585,7 @@ func TestPackageDirIsSafeFileName(t *testing.T) {
 // real constructor rather than a hand-built Supervisor.
 func TestNewSupervisorRegistersAddonTypes(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "otelcol")
-	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700))
+	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700)) //nolint:gosec // G306: agent::executable must be executable
 
 	cfg := config.DefaultSupervisor()
 	cfg.Server.Endpoint = "ws://localhost:4320/v1/opamp"
@@ -607,23 +593,23 @@ func TestNewSupervisorRegistersAddonTypes(t *testing.T) {
 	cfg.Agent.Executable = executable
 	cfg.Capabilities.AcceptsPackages = true
 
-	s, err := NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(splunkTAFactory{}))
+	s, err := NewSupervisor(t.Context(), zap.NewNop(), cfg, WithAddonFactories(customRulesFactory{}))
 	require.NoError(t, err)
-	assert.Equal(t, []addon.Type{"file", "jmx", "splunk_ta"}, s.addons.Types())
+	assert.Equal(t, []addon.Type{"custom_rules", "file", "jmx"}, s.addons.Types())
 
 	// A distribution cannot replace a built-in type by registering it again.
-	_, err = NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(fileaddonDuplicate{}))
+	_, err = NewSupervisor(t.Context(), zap.NewNop(), cfg, WithAddonFactories(fileaddonDuplicate{}))
 	require.ErrorContains(t, err, `addon type "file" is registered more than once`)
 
 	// Without the packages capability nothing is wired, and no addon runs.
 	cfg.Capabilities.AcceptsPackages = false
-	s, err = NewSupervisor(context.Background(), zap.NewNop(), cfg, WithAddonFactories(splunkTAFactory{}))
+	s, err = NewSupervisor(t.Context(), zap.NewNop(), cfg, WithAddonFactories(customRulesFactory{}))
 	require.NoError(t, err)
 	assert.Nil(t, s.addons)
 	assert.Nil(t, s.packages)
 }
 
-type fileaddonDuplicate struct{ splunkTAFactory }
+type fileaddonDuplicate struct{ customRulesFactory }
 
 func (fileaddonDuplicate) Type() addon.Type { return "file" }
 
@@ -633,16 +619,15 @@ func (fileaddonDuplicate) Type() addon.Type { return "file" }
 // reconciliation and the held-back Collector restart must still happen once the
 // sync completes.
 func TestHeldBackRestartSurvivesCancelledMessageContext(t *testing.T) {
-	s := newAddonTestSupervisor(t, splunkTAFactory{})
-	setAddonConfigs(s, map[string]string{"splunk_ta:unix": "disabled"})
+	s := newAddonTestSupervisor(t, customRulesFactory{})
+	setAddonConfigs(s, map[string]string{"custom_rules:base": "disabled"})
 
 	syncer := newGatedSyncer(func() {
-		require.NoError(t, installPackage(s.packages, "splunk_ta:unix", protobufs.PackageType_PackageType_Addon,
-			tarGz(t, map[string]string{"default/app.conf": "[install]\nstate = enabled\n"}),
-			"https://example.invalid/unix.tar.gz", "9.0.0"))
+		require.NoError(t, installPackage(s.packages, "custom_rules:base", tarGz(t, map[string]string{"rules.yaml": "rules: []\n"}),
+			"https://example.invalid/rules.tar.gz", "9.0.0"))
 	})
 
-	msgCtx, cancel := context.WithCancel(context.Background())
+	msgCtx, cancel := context.WithCancel(t.Context())
 	s.syncPackages(msgCtx, syncer, true)
 
 	// The connection drops before the sync finishes.
@@ -651,9 +636,9 @@ func TestHeldBackRestartSurvivesCancelledMessageContext(t *testing.T) {
 
 	require.Eventually(t, func() bool { return restartSignals(s) == 1 }, 10*time.Second, 10*time.Millisecond,
 		"the held-back Collector restart must not be lost when the message context ends")
-	_, dir, ok := s.addons.Get("splunk_ta:unix")
+	_, dir, ok := s.addons.Get("custom_rules:base")
 	require.True(t, ok)
-	conf, err := os.ReadFile(filepath.Join(dir, "local", "app.conf"))
+	conf, err := os.ReadFile(filepath.Join(dir, "state"))
 	require.NoError(t, err)
 	assert.Contains(t, string(conf), "state = disabled", "the addon must still be reconciled")
 }

@@ -4,7 +4,7 @@
 // Package addon installs and runs OpAMP addon (sub-)packages alongside the
 // Collector.
 //
-// An addon's behaviour is decided by its type, which is carried in the package
+// An addon's behavior is decided by its type, which is carried in the package
 // name as "<type>:<name>", the same shape as a Collector confmap URI. The
 // Supervisor ships built-in types and lets a distribution register its own
 // through Factory, so the OpAMP server never tells the Supervisor how to run
@@ -20,7 +20,7 @@ import (
 
 // typeRegexp is the grammar of an addon type. It is the Collector's component
 // type grammar rather than confmap's scheme grammar: confmap schemes follow RFC
-// 3986 and do not allow "_", which rules out names like "splunk_ta", while
+// 3986 and do not allow "_", which rules out names like "custom_rules", while
 // component types do.
 var typeRegexp = regexp.MustCompile(`^[a-zA-Z][0-9a-zA-Z_]{0,62}$`)
 

@@ -20,7 +20,7 @@ func TestParseID(t *testing.T) {
 		{in: "file:geoip", expected: ID{Type: "file", Name: "geoip"}},
 		{in: "jmx:tomcat", expected: ID{Type: "jmx", Name: "tomcat"}},
 		// The component type grammar allows "_", which confmap schemes do not.
-		{in: "splunk_ta:unix", expected: ID{Type: "splunk_ta", Name: "unix"}},
+		{in: "custom_rules:base", expected: ID{Type: "custom_rules", Name: "base"}},
 		// Only the first ":" separates; the name is opaque.
 		{in: "file:dir/geo:2026.10", expected: ID{Type: "file", Name: "dir/geo:2026.10"}},
 		{in: "geoip", expectedError: `must have the form "<type>:<name>"`},
@@ -28,7 +28,7 @@ func TestParseID(t *testing.T) {
 		{in: ":geoip", expectedError: "invalid addon type"},
 		{in: "file:", expectedError: "must not be empty"},
 		{in: "1file:x", expectedError: "invalid addon type"},
-		{in: "splunk-ta:x", expectedError: "invalid addon type"},
+		{in: "custom-rules:x", expectedError: "invalid addon type"},
 		{in: "fi le:x", expectedError: "invalid addon type"},
 		{in: strings.Repeat("a", 64) + ":x", expectedError: "invalid addon type"},
 	}
